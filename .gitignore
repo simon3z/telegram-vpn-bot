@@ -1,0 +1,9 @@
+/.cargo
+/target
+/vendor
+
+# Agent instructions (internal to development setup)
+.agents
+
+# Sensitive configuration (contains bot token)
+config.toml

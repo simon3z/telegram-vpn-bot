@@ -1,0 +1,42 @@
+# Telegram VPN Bot Systemd Service
+# Runs the WireGuard peer manager daemon with minimal capabilities
+
+[Unit]
+Description=Telegram VPN Bot - WireGuard Port Knocking Daemon
+Documentation=https://github.com/simon3z/telegram-vpn-bot
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/telegram-vpn-bot /etc/tgvpnbot/config.toml
+WorkingDirectory=/var/lib/tgvpnbot
+User=tgvpnbot
+Group=tgvpnbot
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+# Capabilities needed for WireGuard interface and route management
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+# Restart policy
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=100%
+IOWeight=100
+
+[Install]
+WantedBy=multi-user.target

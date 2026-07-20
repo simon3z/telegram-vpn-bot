@@ -1,0 +1,44 @@
+# Telegram VPN Bot Configuration
+
+[bot]
+# token = "your-bot-token-here"
+
+[polling]
+timeout = 5
+limit = 20
+
+# Telegram user IDs authorized to use the bot.
+[whitelist]
+[[whitelist.users]]
+id = 123456789
+name = "alice"
+
+[[whitelist.users]]
+id = 987654321
+name = "bob"
+
+[vpn]
+interface_name = "wg0"
+
+# How often the connection monitor polls the WireGuard interface (seconds).
+status_poll_interval = 10
+
+# Seconds after /enable before a peer must complete its first handshake (otherwise auto-disable).
+first_handshake_timeout = 60
+
+# Idle timeout is fixed at 3 minutes (matching WireGuard's ~2 minute handshake renewal cycle).
+
+# Each peer maps a Telegram user to a WireGuard peer.
+# All peers start disabled; the daemon removes any still on the interface on startup.
+# The public_key field is required — omitting it causes runtime errors on restart.
+[[vpn.peers]]
+telegram_id = 123456789
+name = "peer1"
+allowed_ips = "10.8.0.2/32"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+[[vpn.peers]]
+telegram_id = 123456789
+name = "peer2"
+allowed_ips = "10.8.0.3/32"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
