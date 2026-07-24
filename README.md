@@ -6,6 +6,7 @@
 [![rust-edition][badge-rust]][link-rust]
 [![dependencies][badge-deps]][link-cargo]
 [![tests][badge-tests]][link-ci]
+[![coverage][badge-coverage]][link-coverage]
 
 [badge-github]: https://img.shields.io/badge/github-simon3z/telegram--vpn--bot-6f57b0.svg?logo=github
 [badge-license]: https://img.shields.io/badge/license-MIT-blue.svg
@@ -13,12 +14,14 @@
 [badge-rust]: https://img.shields.io/badge/rust-edition_2021-steelblue.svg
 [badge-deps]: https://img.shields.io/badge/dependencies-11-green.svg
 [badge-tests]: https://img.shields.io/badge/tests-80_passing-brightgreen.svg
+[badge-coverage]: https://img.shields.io/badge/coverage-67%25-orange.svg
 [link-github]: https://github.com/simon3z/telegram-vpn-bot
 [link-license]: LICENSE
 [link-crate]: https://crates.io
 [link-cargo]: Cargo.toml
 [link-rust]: https://www.rust-lang.org
 [link-ci]: #quick-start
+[link-coverage]: #code-coverage
 
 A Telegram bot that implements **port knocking** for WireGuard VPN access. Users knock by sending `/enable <peer>` — the bot flips the peer from inactive to active on the WireGuard interface. Disabling removes it entirely. On every restart the daemon wipes all peers clean, so the VPN surface stays zero unless someone actively enables it.
 
@@ -146,6 +149,18 @@ Notifications (connect, timeout, idle) are dispatched asynchronously via a separ
 Configure poll interval and first-handshake timeout via `[vpn].status_poll_interval`
 and `[vpn].first_handshake_timeout` in `config.toml`. Idle timeout is hardcoded at
 3 minutes.
+
+## Code Coverage
+
+Install [`cargo-llvm-cov`](https://github.com/tafia/cargo-llvm-cov), then:
+
+```bash
+./scripts/coverage.sh
+```
+
+Prints a coverage summary (lines, functions, branches) and generates:
+- `target/coverage/html/index.html` — interactive per-file coverage
+- `target/coverage/lcov.info` — LCOV file for CI/bots
 
 ## Logging
 
