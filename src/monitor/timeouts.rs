@@ -1,8 +1,20 @@
 //! Per-peer timeout checks.
 //!
-//! Each function inspects a [`PeerState`] against a deadline and, if the
-//! deadline has passed, mutates the peer into the disabled state and returns
-//! a notification event describing what happened.
+//! Two independent watchdog timers run on every poll while a peer is enabled:
+//!
+//! 1. **Connection deadline** ([`check_first_handshake_timeout`]) — counts
+//!    elapsed seconds since [`PeerState::first_seen_at`]. If no handshake
+//!    arrives within the configured window (default 60 s, configurable via
+//!    `vpn.first_handshake_timeout`), the peer is auto-disabled and the user
+//!    receives a [`NotificationKind::FirstHandshakeTimeout`] notification.
+//!
+//! 2. **Idle watchdog** ([`check_idle_timeout`]) — counts elapsed seconds
+//!    since [`PeerState::last_handshake`]. If the session goes quiet past the
+//!    hard-coded 180 s threshold, the peer is auto-disabled and the user
+//!    receives a [`NotificationKind::IdleDisconnected`] notification.
+//!
+//! Both timers read from `PeerState`, never from the kernel directly, so they
+//! are immune to lib-wg quirks around `last_handshake` reporting.
 
 use std::time::{Duration, SystemTime};
 
@@ -12,10 +24,15 @@ use crate::state::*;
 
 use super::types::*;
 
-/// Check whether the peer has exceeded the first-handshake timeout.
+/// Connection-deadline timer.
 ///
-/// Drives the timeout off `ps.first_seen_at` rather than the kernel-reported
-/// `last_handshake`, because lib-wg wraps "no handshake" into `UNIX_EPOCH`
+/// Counts elapsed seconds since [`PeerState::first_seen_at`]. Fires when the
+/// configured window elapses without a successful handshake, at which point
+/// the peer is auto-disabled and a [`NotificationKind::FirstHandshakeTimeout`]
+/// event is returned.
+///
+/// Driven from `first_seen_at` rather than the kernel-reported
+/// `last_handshake` because lib-wg wraps "no handshake" into `UNIX_EPOCH`,
 /// which would otherwise fire immediately.
 pub(crate) fn check_first_handshake_timeout(
     ps: &mut PeerState,
@@ -46,7 +63,12 @@ pub(crate) fn check_first_handshake_timeout(
     }
 }
 
-/// Check whether the session has been idle past the threshold.
+/// Idle-watchdog timer.
+///
+/// Counts elapsed seconds since [`PeerState::last_handshake`]. Fires when the
+/// session has been quiet for longer than the threshold (hard-coded 180 s),
+/// at which point the peer is auto-disabled and a
+/// [`NotificationKind::IdleDisconnected`] event is returned.
 pub(crate) fn check_idle_timeout(
     ps: &mut PeerState,
     now: SystemTime,

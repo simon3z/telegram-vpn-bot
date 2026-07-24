@@ -45,8 +45,8 @@ enum DesiredState { Enabled, Disabled }
 struct PeerState {
     config: PeerConfig,                // immutable snapshot from config
     desired: DesiredState,             // operator intent (mutated by handlers)
-    first_seen_at: Option<SystemTime>, // when we first observed this peer online
-    last_handshake: Option<SystemTime>, // latest kernel-reported handshake
+    first_seen_at: Option<SystemTime>, // connection-deadline reference time
+    last_handshake: Option<SystemTime>, // idle-watchdog reference time
 }
 
 enum VpnConnectionState {
@@ -109,18 +109,24 @@ currently on the interface are examined:
 > checks while the route is gone would leave the peer invisible to timeout
 > and idle detection until the next reconcile cycle repaired it.
 
-1. **First-handshake timeout**: If the peer has been seen for longer than
-   `first_handshake_timeout` (configurable, default 60s) without completing
-   a handshake → remove from interface, mark `Disabled`, notify user.
-2. **Idle detection**: Once a handshake has completed, if no new handshake
-   arrives within `IDLE_TIMEOUT_SECS` (3 minutes, hardcoded) → remove from
-   interface, mark `Disabled`, notify user.
+Two independent watchdog timers run on every poll while a peer is enabled:
+
+1. **Connection-deadline timer** — counts elapsed seconds since
+   `first_seen_at`. If no handshake arrives within the configured window
+   (`first_handshake_timeout`, default 60 s), the peer is marked `Disabled`
+   and the user receives a `FirstHandshakeTimeout` notification.
+   **Reconcile** then removes it from the interface on the next cycle.
+2. **Idle watchdog** — counts elapsed seconds since `last_handshake`.
+   If the session goes quiet past the hard-coded 180 s threshold, the peer
+   is marked `Disabled` and the user receives an `IdleDisconnected`
+   notification. **Reconcile** removes it on the next cycle.
 3. **Connection established**: On the transition from no-handshake to
    handshake → notify user once.
 
-The timeout uses our own `first_seen_at` observation time, NOT the kernel's
-`last_handshake`, because the library wraps zero-valued timestamps into
-`UNIX_EPOCH`, which would otherwise cause immediate false timeouts.
+Both timers read from `PeerState`, never from the kernel directly. The
+connection-deadline uses `first_seen_at` (our observation time) instead of
+the kernel's `last_handshake` because lib-wg wraps "no handshake" into
+`UNIX_EPOCH`, which would otherwise fire immediately.
 
 ### Phase C: Reconciliation
 
@@ -272,7 +278,8 @@ src/
 | Flat `Vec<PeerState>` | Simpler than HashMap; peer counts are small |
 | Command wakes the loop | Sub-second response instead of waiting for poll interval |
 | Three-phase cycle (sync → health → reconcile) | Separation of concerns: read, decide, act |
-| `first_seen_at` drives timeout | Kernel's zero-wrapped timestamp would cause false timeouts |
+| Dual watchdog timers | Connection-deadline (`first_seen_at`) and idle watchdog (`last_handshake`) serve different purposes; both read from `PeerState` to avoid lib-wg's `UNIX_EPOCH` zero-wrap quirk |
+| Timers cleared on lifecycle boundaries | `reconcile_enabled_peer` resets `first_seen_at` and conditionally clears `last_handshake` on successful creation; `reconcile_disabled_peer` clears both on successful removal — each side of the lifecycle leaves `PeerState` clean |
 | Health checks gated on peer only | Route loss is transient and handled by reconcile; skipping health monitoring while the route is gone would leave peers invisible to timeout/idle detection |
 | Separate notification task | Monitor stays fast; Telegram sends don't block the loop |
 | Idempotent peer ops | `ensure_*` and `disable_*` tolerate "already done" gracefully |

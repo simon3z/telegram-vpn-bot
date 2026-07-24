@@ -87,15 +87,24 @@ fn capture_kernel_handshake(ps: &mut PeerState, peer: &defguard_wireguard_rs::pe
     was_no_handshake
 }
 
-/// Process a single peer that is confirmed active on the interface.
+/// Process one enabled peer confirmed present on the interface.
 ///
-/// Uses `ps.first_seen_at` (our observation time) to drive the timeout,
-/// decoupling our timer from lib/kernel quirks around `last_handshake`
-/// reporting. The kernel may omit the field or wrap zero into `UNIX_EPOCH`,
-/// neither of which should affect our own bookkeeping.
+/// Flow:
 ///
-/// Returns a notification event if the peer just completed its first
-/// handshake, or `None` otherwise.
+/// 1. Record [`PeerState::first_seen_at`] on first encounter (subsequent
+///    polls leave it untouched).
+/// 2. Capture the kernel-reported `last_handshake`, filtering out bogus
+///    `UNIX_EPOCH` values that lib-wg uses to represent "no handshake."
+/// 3. If this poll detected a handshake transition (none → some), emit a
+///    [`NotificationKind::ConnectionEstablished`] event and stop.
+/// 4. Otherwise dispatch to the appropriate watchdog based on phase:
+///    - **No handshake yet** → connection-deadline timer
+///      ([`super::timeouts::check_first_handshake_timeout`]).
+///    - **Handshake captured** → idle watchdog
+///      ([`super::timeouts::check_idle_timeout`]).
+///
+/// Returns a notification event only when something changed or a deadline
+/// fired; otherwise returns `None`.
 pub(crate) async fn process_one_peer(
     ps: &mut PeerState,
     peer: &defguard_wireguard_rs::peer::Peer,
@@ -129,12 +138,12 @@ pub(crate) async fn process_one_peer(
         ps.config.name, elapsed_first, elapsed_hs,
     );
 
-    // Pre-handshake phase: watch for first-handshake timeout.
+    // No handshake yet — apply the connection-deadline timer.
     if ps.last_handshake.is_none() {
         return super::timeouts::check_first_handshake_timeout(ps, now, first_hs_timeout);
     }
 
-    // Post-handshake phase: watch for idle disconnect.
+    // Handshake captured — apply the idle watchdog.
     super::timeouts::check_idle_timeout(ps, now, idle_timeout)
 }
 
