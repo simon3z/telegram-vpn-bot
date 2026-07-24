@@ -147,6 +147,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_command_strips_leading_whitespace() {
+        let result = parse_command("   /enable alice").unwrap();
+        assert_eq!(result.0, "/enable");
+        assert_eq!(result.1, vec!["alice"]);
+    }
+
+    #[test]
+    fn test_parse_command_handles_multiple_args() {
+        let result = parse_command("/enable alice bob carol").unwrap();
+        assert_eq!(result.0, "/enable");
+        assert_eq!(result.1, vec!["alice", "bob", "carol"]);
+    }
+
+    #[test]
+    fn test_parse_command_trims_trailing_whitespace_on_args() {
+        let result = parse_command("/enable alice   ").unwrap();
+        assert_eq!(result.1, vec!["alice"]);
+    }
+
+    #[test]
+    fn test_parse_command_rejects_single_character_input() {
+        assert_eq!(parse_command("a"), None);
+    }
+
+    #[test]
+    fn test_parse_command_preserves_truncated_content_up_to_limit() {
+        let long_arg = "abcdefghij";
+        let result = parse_command(&format!("/enable {}", long_arg)).unwrap();
+        assert_eq!(result.1[0], long_arg);
+    }
+
+    #[test]
     fn test_resolve_peer_finds_by_name() {
         let st = make_state("alice", "10.0.0.2/32", TEST_USER_ID);
         let peer = st.resolve_peer(TEST_USER_ID, Some("alice")).unwrap();

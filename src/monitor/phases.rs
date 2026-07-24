@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use crate::state::*;
+use crate::vpn;
 
 use super::health;
 use super::reconcile;
@@ -20,6 +21,7 @@ pub fn spawn_monitor(
     state: Arc<RwLock<SystemState>>,
     mut wake_rx: mpsc::Receiver<WakeSignal>,
     notify_tx: mpsc::Sender<NotificationEvent>,
+    kernel_ops: Arc<dyn vpn::WireGuardOps + Send + Sync>,
 ) -> MonitorHandle {
     let handle = tokio::spawn(async move {
         let initial = state.read().await;
@@ -31,7 +33,7 @@ pub fn spawn_monitor(
             IDLE_TIMEOUT_SECS / 60,
         );
         drop(initial);
-        run_monitor_loop(state, &mut wake_rx, notify_tx).await;
+        run_monitor_loop(state, &mut wake_rx, notify_tx, kernel_ops).await;
     });
 
     MonitorHandle { handle }
@@ -43,6 +45,7 @@ async fn run_monitor_loop(
     state: Arc<RwLock<SystemState>>,
     wake_rx: &mut mpsc::Receiver<WakeSignal>,
     notify_tx: mpsc::Sender<NotificationEvent>,
+    kernel_ops: Arc<dyn vpn::WireGuardOps + Send + Sync>,
 ) {
     let (iface_name, poll_interval, first_hs_timeout) = {
         let s = state.read().await;
@@ -53,6 +56,7 @@ async fn run_monitor_loop(
         )
     };
     let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS);
+    let ops: &(dyn vpn::WireGuardOps + Send + Sync) = &*kernel_ops;
 
     let mut next_wake = tokio::time::Instant::now() + poll_interval;
 
@@ -69,7 +73,7 @@ async fn run_monitor_loop(
         // Run the full cycle: sync actual state, health checks, then reconcile.
         let events = {
             let mut s = state.write().await;
-            run_full_cycle_inner(&mut s, &iface_name, &first_hs_timeout, &idle_timeout).await
+            run_full_cycle_inner(&mut s, &iface_name, &first_hs_timeout, &idle_timeout, ops).await
         };
 
         // Dispatch events to users via Telegram.
@@ -86,15 +90,15 @@ async fn run_monitor_loop(
 }
 
 /// Run one full poll cycle: sync VPN connection state, run health checks,
-/// then reconcile declared intent vs reality. Returns a vector of notification
-/// events to dispatch.
-async fn run_full_cycle_inner(
+/// then reconcile. Returns a vector of notification events to dispatch.
+pub(crate) async fn run_full_cycle_inner(
     state: &mut SystemState,
     iface_name: &str,
     first_hs_timeout: &Duration,
     idle_timeout: &Duration,
+    ops: &(dyn vpn::WireGuardOps + Send + Sync),
 ) -> Vec<NotificationEvent> {
-    let snapshot = PollSnapshot::capture(iface_name).await;
+    let snapshot = PollSnapshot::capture(ops, iface_name).await;
 
     // Phase A: Sync VPN connection state from snapshot.
     sync_vpn_connection(state, &snapshot);
@@ -104,13 +108,13 @@ async fn run_full_cycle_inner(
         health::run_health_checks(state, &snapshot, first_hs_timeout, idle_timeout).await;
 
     // Phase C: Reconcile. Align desired ↔ actual. No notifications are produced here.
-    reconcile::reconcile_all(state, &snapshot).await;
+    reconcile::reconcile_all(state, &snapshot, ops).await;
 
     health_events
 }
 
 /// Sync VPN connection state from the captured snapshot.
-fn sync_vpn_connection(state: &mut SystemState, snapshot: &PollSnapshot) {
+pub(crate) fn sync_vpn_connection(state: &mut SystemState, snapshot: &PollSnapshot) {
     let latest_handshake = snapshot.latest_handshake();
     let connected = snapshot.has_any_peer() && latest_handshake.is_some();
     state.vpn_connection = if connected {

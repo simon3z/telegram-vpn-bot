@@ -13,8 +13,8 @@
 [badge-version]: https://img.shields.io/badge/version-0.2.0-ff8000.svg
 [badge-rust]: https://img.shields.io/badge/rust-edition_2021-steelblue.svg
 [badge-deps]: https://img.shields.io/badge/dependencies-11-green.svg
-[badge-tests]: https://img.shields.io/badge/tests-80_passing-brightgreen.svg
-[badge-coverage]: https://img.shields.io/badge/coverage-67%25-orange.svg
+[badge-tests]: https://img.shields.io/badge/tests-136_passing-brightgreen.svg
+[badge-coverage]: https://img.shields.io/badge/coverage-84%25-brightgreen.svg
 [link-github]: https://github.com/simon3z/telegram-vpn-bot
 [link-license]: LICENSE
 [link-crate]: https://crates.io

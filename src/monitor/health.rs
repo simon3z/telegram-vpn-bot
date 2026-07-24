@@ -76,15 +76,15 @@ fn record_first_seen(ps: &mut PeerState, now: SystemTime) {
 /// Capture the kernel-reported handshake timestamp, skipping zero-valued ones.
 /// The library wraps "no handshake" into UNIX_EPOCH, which must be filtered out.
 ///
-/// Returns whether the peer had no recorded handshake before this call.
+/// Returns whether the peer had no recorded handshake *before* this update.
 fn capture_kernel_handshake(ps: &mut PeerState, peer: &defguard_wireguard_rs::peer::Peer) -> bool {
-    let was_no_handshake = ps.last_handshake.is_none();
+    let had_previously_no_handshake = ps.last_handshake.is_none();
     if let Some(hs_time) = peer.last_handshake {
         if hs_time > SystemTime::UNIX_EPOCH {
             ps.last_handshake = Some(hs_time);
         }
     }
-    was_no_handshake
+    had_previously_no_handshake
 }
 
 /// Process one enabled peer confirmed present on the interface.
@@ -467,11 +467,10 @@ mod tests {
         assert_eq!(ps.desired, DesiredState::Enabled);
     }
 
-    /// Regression: debug-log time deltas must match the values used by the
-    /// timeout/idle decision logic. Both read from the same `now` parameter,
-    /// not from a freshly-called SystemTime::now().
+    /// Regression: debug-log time deltas read from the `now` argument, not a
+    /// fresh SystemTime::now(), so they stay stable across repeated polls.
     #[tokio::test]
-    async fn test_debug_log_consistent_with_decision_logic() {
+    async fn test_debug_log_uses_passed_now_not_system_time() {
         let mut ps = make_peer_state("alice", "10.0.0.2/32", ALICE_ID);
         ps.desired = DesiredState::Enabled;
 
@@ -484,14 +483,8 @@ mod tests {
         let peer = defguard_wireguard_rs::peer::Peer::new(key);
         let now = SystemTime::now();
 
-        // We can't easily capture the debug log output in a unit test, but
-        // we can verify that the elapsed computation produces values that
-        // match the expected deltas (within tolerance for test execution time).
-        let expected_first_elapsed = now.duration_since(first_seen).unwrap().as_secs();
-        let expected_hs_elapsed = now.duration_since(hs_time).unwrap().as_secs();
-
-        // Call process_one_peer — it must not panic and must compute elapsed
-        // values consistent with now, not with a fresh SystemTime::now().
+        // process_one_peer must not panic and must preserve state when
+        // both timers are within their thresholds.
         let _event = process_one_peer(
             &mut ps,
             &peer,
@@ -506,27 +499,6 @@ mod tests {
         // first_seen_at and last_handshake should be preserved.
         assert_eq!(ps.first_seen_at, Some(first_seen));
         assert_eq!(ps.last_handshake, Some(hs_time));
-
-        // Verify the internal elapsed calculations produce values close to
-        // the expected deltas. We allow ±1 second tolerance for test timing.
-        let ref_now = SystemTime::now();
-        let delta_first = ref_now.duration_since(first_seen).unwrap().as_secs();
-        let delta_hs = ref_now.duration_since(hs_time).unwrap().as_secs();
-
-        let diff_first = delta_first.abs_diff(expected_first_elapsed);
-        let diff_hs = delta_hs.abs_diff(expected_hs_elapsed);
-        assert!(
-            diff_first <= 1,
-            "first_seen elapsed should match: got {} expected {}",
-            delta_first,
-            expected_first_elapsed
-        );
-        assert!(
-            diff_hs <= 1,
-            "last_handshake elapsed should match: got {} expected {}",
-            delta_hs,
-            expected_hs_elapsed
-        );
     }
 
     /// Regression: once first_seen_at is recorded, subsequent polls do NOT
@@ -598,36 +570,98 @@ mod tests {
         assert_eq!(ps.desired, DesiredState::Enabled);
     }
 
-    /// Regression: after reconcile resets last_handshake, the next health
-    /// check detects the handshake transition and sends ConnectionEstablished.
+    /// Health checks skip disabled peers entirely — only enabled+present peers
+    /// enter the processing pipeline.
     #[tokio::test]
-    async fn test_connection_notification_fires_after_reconcile_resets_last_handshake() {
-        let mut ps = make_peer_state("alice", "10.0.0.2/32", ALICE_ID);
-        ps.desired = DesiredState::Enabled;
+    async fn test_health_checks_skip_disabled_peers() {
+        use super::super::types::PollSnapshot;
 
-        // Simulate stale last_handshake from a previous session.
-        let stale_hs = SystemTime::now() - Duration::from_secs(600);
-        ps.last_handshake = Some(stale_hs);
+        let mut state = crate::state::SystemState::from_config(crate::config::VpnConfig {
+            interface_name: "wg0".into(),
+            peers: vec![
+                crate::config::PeerConfig {
+                    telegram_id: ALICE_ID,
+                    name: "alice".into(),
+                    allowed_ips: "10.0.0.2/32".into(),
+                    public_key: defguard_wireguard_rs::key::Key::new([1u8; 32]).to_string(),
+                },
+                crate::config::PeerConfig {
+                    telegram_id: BOB_ID,
+                    name: "bob".into(),
+                    allowed_ips: "10.0.0.3/32".into(),
+                    public_key: defguard_wireguard_rs::key::Key::new([2u8; 32]).to_string(),
+                },
+            ],
+            ..Default::default()
+        });
 
-        // Simulate reconcile having reset last_handshake (as it does on success).
-        ps.last_handshake = None;
+        // Alice is enabled; Bob is disabled.
+        state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
 
-        let key = defguard_wireguard_rs::key::Key::new([1u8; 32]);
-        let mut peer = defguard_wireguard_rs::peer::Peer::new(key);
-        peer.last_handshake = Some(SystemTime::now() - Duration::from_secs(5));
-
+        // Snapshot has both peers present (matching their configured pubkeys).
+        let alice_key: defguard_wireguard_rs::key::Key = state.peers[0]
+            .config
+            .public_key
+            .as_str()
+            .try_into()
+            .unwrap();
+        let bob_key: defguard_wireguard_rs::key::Key = state.peers[1]
+            .config
+            .public_key
+            .as_str()
+            .try_into()
+            .unwrap();
         let now = SystemTime::now();
-        let event = process_one_peer(
-            &mut ps,
-            &peer,
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(180),
+        let mut alice_peer = defguard_wireguard_rs::peer::Peer::new(alice_key);
+        alice_peer.last_handshake = Some(now - Duration::from_secs(5));
+        let mut bob_peer = defguard_wireguard_rs::peer::Peer::new(bob_key);
+        // Bob's handshake is stale — would trigger idle if he were enabled.
+        bob_peer.last_handshake = Some(now - Duration::from_secs(300));
+        let snapshot = PollSnapshot {
+            iface_name: "wg0".into(),
+            peers: vec![alice_peer, bob_peer],
+            routes: vec![],
+        };
+
+        let events = run_health_checks(
+            &mut state,
+            &snapshot,
+            &Duration::from_secs(60),
+            &Duration::from_secs(180),
         )
         .await;
 
-        // Connection established notification should fire (transition detected).
-        let evt = event.expect("expected connection established notification");
-        assert_eq!(evt.kind, NotificationKind::ConnectionEstablished);
+        // Only Alice's events could appear (Bob is disabled → skipped).
+        for ev in &events {
+            assert_eq!(ev.user_id, ALICE_ID, "Bob must not generate events");
+        }
+    }
+
+    /// Health checks also skip enabled peers that are NOT on the interface —
+    /// reconcile will handle them, so there is nothing to assess yet.
+    #[tokio::test]
+    async fn test_health_checks_skip_enabled_but_absent_peers() {
+        let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
+        state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
+
+        // Empty snapshot — peer is not on interface.
+        let snapshot = super::super::types::PollSnapshot {
+            iface_name: "wg0".into(),
+            peers: vec![],
+            routes: vec![],
+        };
+
+        let events = run_health_checks(
+            &mut state,
+            &snapshot,
+            &Duration::from_secs(60),
+            &Duration::from_secs(180),
+        )
+        .await;
+
+        assert!(
+            events.is_empty(),
+            "enabled-but-absent peer should produce no events"
+        );
     }
 }

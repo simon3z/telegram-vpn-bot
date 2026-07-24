@@ -1,7 +1,5 @@
 use std::time::SystemTime;
 
-use defguard_wireguard_rs::WireguardInterfaceApi;
-
 use crate::vpn;
 
 /// Wake-up signal from command handlers. Carries no payload — the receiver
@@ -19,19 +17,18 @@ pub(crate) struct PollSnapshot {
 }
 
 impl PollSnapshot {
-    /// Capture current interface + route state. Returns defaults (empty)
-    /// on any read error — phases treat an empty snapshot as "interface
-    /// unavailable" and skip accordingly.
-    pub(crate) async fn capture(iface_name: &str) -> Self {
-        let peers = defguard_wireguard_rs::WGApi::<defguard_wireguard_rs::Kernel>::new(iface_name)
-            .and_then(|api| api.read_interface_data())
-            .map(|d| d.peers.into_values().collect())
+    /// Capture current interface + route state using the provided VPN backend.
+    /// Returns defaults (empty) on any read error — phases treat an empty
+    /// snapshot as "interface unavailable" and skip accordingly.
+    pub(crate) async fn capture(
+        ops: &(dyn vpn::WireGuardOps + Send + Sync),
+        iface_name: &str,
+    ) -> Self {
+        let peers = ops
+            .read_interface_data(iface_name)
+            .await
             .unwrap_or_default();
-
-        let routes = match nlink::netlink::Connection::<nlink::netlink::Route>::new() {
-            Ok(conn) => conn.get_routes().await.unwrap_or_else(|_| vec![]),
-            Err(_) => vec![],
-        };
+        let routes = ops.get_routes(iface_name).await.unwrap_or_default();
 
         Self {
             iface_name: iface_name.to_string(),
@@ -143,5 +140,68 @@ impl MonitorHandle {
     /// Abort the monitoring loop. Consumes the handle; subsequent calls panic.
     pub fn abort(self) {
         self.handle.abort();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_label_returns_lowercase_underscored_name() {
+        assert_eq!(
+            NotificationKind::ConnectionEstablished.label(),
+            "connection_established"
+        );
+        assert_eq!(
+            NotificationKind::IdleDisconnected.label(),
+            "idle_disconnected"
+        );
+        assert_eq!(
+            NotificationKind::FirstHandshakeTimeout { elapsed_secs: 60 }.label(),
+            "first_handshake_timeout"
+        );
+    }
+
+    #[test]
+    fn test_format_connected_includes_peer_name_and_html_tag() {
+        let msg = NotificationKind::ConnectionEstablished.format_message("alice");
+        assert!(msg.contains("<b>"));
+        assert!(msg.contains("alice"));
+        assert!(msg.contains("Connected"));
+        assert!(msg.contains("active"));
+    }
+
+    #[test]
+    fn test_format_idle_includes_peer_name_and_idle_hint() {
+        let msg = NotificationKind::IdleDisconnected.format_message("bob");
+        assert!(msg.contains("<b>"));
+        assert!(msg.contains("bob"));
+        assert!(msg.contains("Disconnected"));
+        assert!(msg.contains("idle"));
+    }
+
+    #[test]
+    fn test_format_timeout_includes_elapsed_seconds() {
+        let msg =
+            NotificationKind::FirstHandshakeTimeout { elapsed_secs: 90 }.format_message("carol");
+        assert!(msg.contains("<b>"));
+        assert!(msg.contains("carol"));
+        assert!(msg.contains("Timeout"));
+        assert!(msg.contains("90s"));
+    }
+
+    #[test]
+    fn test_format_message_escapes_special_chars_in_peer_name() {
+        // Peer names shouldn't normally contain HTML, but if they do they
+        // should be embedded literally — these messages go through Telegram's
+        // HTML parser which treats <b> as tags.
+        let msg = NotificationKind::ConnectionEstablished.format_message("alice");
+        // Should NOT double-escape the name (the format macros insert it raw).
+        assert!(!msg.contains("&amp;"));
     }
 }

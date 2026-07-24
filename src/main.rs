@@ -136,14 +136,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Remove any leftover peers/routes left over from a previous crash or
     // unclean shutdown. Runs before the monitor starts so we don't race with
     // it.
-    vpn::cleanup_managed_peers(&cfg.vpn).await?;
+    let kernel_ops = Arc::new(vpn::KernelWgOps);
+    vpn::cleanup_managed_peers(&*kernel_ops, &cfg.vpn).await?;
 
     // Set up communication channels.
     let (wake_tx, wake_rx) = mpsc::channel(32);
 
     // Spawn the monitoring loop. It owns SystemState and performs reconciliation.
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<monitor::NotificationEvent>(16);
-    let monitor_handle = monitor::spawn_monitor(system_state.clone(), wake_rx, notify_tx.clone());
+    let monitor_handle = monitor::spawn_monitor(
+        system_state.clone(),
+        wake_rx,
+        notify_tx.clone(),
+        kernel_ops.clone(),
+    );
 
     // Drain notification events from the monitor and send them via Telegram.
     let client_for_notify = client.clone();
@@ -206,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     monitor_handle.abort();
 
     // 2. Now safe to cleanse the interface — no concurrent writes possible.
-    if let Err(e) = vpn::cleanup_managed_peers(&cfg.vpn).await {
+    if let Err(e) = vpn::cleanup_managed_peers(&*kernel_ops, &cfg.vpn).await {
         tracing::error!("interface cleanup failed: {e}");
     }
 

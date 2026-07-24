@@ -16,5 +16,6 @@ nlink = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "std", "env-filter"] }
 tracing-journald = "0.3"
+async-trait = "0.1"
 libc = "0.2.186"
 html-escape = "0.2"
