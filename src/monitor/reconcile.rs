@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use tracing::{debug, info, warn};
 
 use crate::state::*;
@@ -48,11 +50,15 @@ async fn reconcile_enabled_peer(ps: &mut PeerState, snapshot: &PollSnapshot) {
 
     match outcome {
         Ok(()) => {
-            // Note: we intentionally do NOT reset first_seen_at or
-            // last_handshake here. Those timers measure connection health,
-            // not infrastructure state. Fixing the route does not erase how
-            // long the peer has been trying to connect or how long since its
-            // last handshake.
+            // Both timers are touched only when we actually created the peer.
+            // If the peer was already on the interface and we only fixed the
+            // route, the connection never went down — overwriting the
+            // observation timestamps would lose legitimate history and
+            // potentially fire a spurious ConnectionEstablished notification.
+            if !params.peer_present {
+                ps.first_seen_at = Some(SystemTime::now());
+                ps.last_handshake = None;
+            }
             info!("reconciled: enabled + added: peer={peer_name}, cidr={cidr}",);
         }
         Err(reason) => {
