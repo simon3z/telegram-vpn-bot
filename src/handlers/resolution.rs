@@ -300,4 +300,50 @@ mod tests {
         assert_ne!(p1.config.public_key, p2.config.public_key);
         assert_ne!(p1.config.allowed_ips, p2.config.allowed_ips);
     }
+
+    /// Regression: an enabled-but-not-connected peer must show "Last handshake:
+    /// never". lib-wg wraps the kernel's zero-sentinel into `UNIX_EPOCH`, so a
+    /// peer with `last_handshake = UNIX_EPOCH` and no endpoint has never
+    /// completed a handshake despite being configured on the interface.
+    #[test]
+    fn test_active_peer_with_epoch_handshake_and_no_endpoint_shows_never() {
+        use std::time::SystemTime;
+
+        use crate::vpn::PeerInfo;
+
+        let info = PeerInfo::Active {
+            last_handshake: Some(SystemTime::UNIX_EPOCH),
+            endpoint: None,
+        };
+
+        assert!(
+            info.seconds_since_last_handshake().is_none(),
+            "expected 'never' for an enabled-but-not-connected peer, \
+             but got {:?}",
+            info.seconds_since_last_handshake(),
+        );
+    }
+
+    /// A peer with a real handshake timestamp AND a known endpoint must report
+    /// elapsed seconds — confirms the endpoint guard does not over-match.
+    #[test]
+    fn test_active_peer_with_real_handshake_and_endpoint_reports_elapsed() {
+        use std::time::{Duration, SystemTime};
+
+        use crate::vpn::PeerInfo;
+
+        let five_seconds_ago = SystemTime::now() - Duration::from_secs(5);
+        let info = PeerInfo::Active {
+            last_handshake: Some(five_seconds_ago),
+            endpoint: Some("1.2.3.4:51820".parse().unwrap()),
+        };
+
+        let secs = info.seconds_since_last_handshake();
+        assert!(secs.is_some(), "expected elapsed seconds, got None");
+        let secs = secs.unwrap();
+        assert!(
+            (5..=7).contains(&secs),
+            "expected ~5 seconds elapsed, got {secs}"
+        );
+    }
 }

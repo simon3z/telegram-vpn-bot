@@ -151,28 +151,42 @@ pub fn find_matching_route(
 }
 
 /// Metadata about a WireGuard peer returned by [`get_peer_status`].
+///
+/// `endpoint` and `last_handshake` come straight from the kernel. Together
+/// they tell us whether a real handshake happened:
+///
+/// - An endpoint requires a UDP packet from the client, which in turn requires
+///   a completed handshake. Without one, any `last_handshake` reported by
+///   lib-wg is the zero-sentinel wrapped into `UNIX_EPOCH`.
+/// - We therefore only compute elapsed seconds when **both** fields are
+///   populated; otherwise the peer has never shaken hands.
 #[derive(Debug, Clone)]
 pub enum PeerInfo {
     Inactive,
-    Active { last_handshake: Option<SystemTime> },
+    Active {
+        last_handshake: Option<SystemTime>,
+        endpoint: Option<std::net::SocketAddr>,
+    },
 }
 
 impl PeerInfo {
+    /// Elapsed seconds since the most recent handshake, or `None` if none has
+    /// occurred. Returns `None` unless both `last_handshake` and `endpoint`
+    /// are populated — a peer cannot complete a cryptographic handshake
+    /// without first establishing a UDP connection, so a missing endpoint
+    /// invalidates any `last_handshake` value the kernel reports.
     pub fn seconds_since_last_handshake(&self) -> Option<u64> {
-        match self {
-            Self::Inactive => None,
+        let t = match self {
             Self::Active {
                 last_handshake: Some(t),
-                ..
-            } => SystemTime::now()
-                .duration_since(*t)
-                .ok()
-                .map(|d| d.as_secs()),
-            Self::Active {
-                last_handshake: None,
-                ..
-            } => None,
-        }
+                endpoint: Some(_),
+            } => *t,
+            _ => return None,
+        };
+        SystemTime::now()
+            .duration_since(t)
+            .ok()
+            .map(|d| d.as_secs())
     }
 }
 
@@ -193,6 +207,7 @@ pub fn get_peer_status(iface: &str, allowed_ips: &str) -> Result<(bool, PeerInfo
                     true,
                     PeerInfo::Active {
                         last_handshake: peer.last_handshake,
+                        endpoint: peer.endpoint,
                     },
                 ));
             }
