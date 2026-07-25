@@ -118,16 +118,11 @@ compromised, the attack surface remains tightly bounded.
 
 ## Architecture
 
-```
-Telegram (users)
-    ◄──►  telegram-vpn-bot (Rust binary)
-                    │
-                    │  netlink (kernel WireGuard module)
-                    ▼
-          WireGuard interface (pre-configured, no persistent peers)
-               ┌────┴────┐
-               │  peers  │  ← transient: only alive during /enable
-               └─────────┘
+```mermaid
+flowchart LR
+    U["👤 Telegram Users"] <-->|commands| B["⚙️ telegram-vpn-bot\n(Rust binary)"]
+    B -->|netlink| W["🔒 WireGuard interface\n(pre-configured, no persistent peers)"]
+    W --> P[("🧩 transient peers\nonly alive during /enable")]
 ```
 
 Every startup and shutdown performs a full peer cleanup, so the interface never retains client state between runs.

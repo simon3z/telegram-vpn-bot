@@ -39,31 +39,36 @@ configured by the sysadmin; the bot only manages peer keys and routes.
 
 Defined in `state.rs`:
 
-```rust
-enum DesiredState { Enabled, Disabled }
+```mermaid
+classDiagram
+    class SystemState {
+        PeerState[] peers
+        VpnConnectionState vpn_connection
+        VpnConfig config
+    }
+    class PeerState {
+        PeerConfig config
+        DesiredState desired
+        SystemTime? first_seen_at
+        SystemTime? last_handshake
+    }
+    class PeerConfig {
+        i64 telegram_id
+        String name
+        String allowed_ips
+        String public_key
+    }
+    class DesiredState
+    class VpnConnectionState
 
-struct PeerState {
-    config: PeerConfig,                // immutable snapshot from config
-    desired: DesiredState,             // operator intent (mutated by handlers)
-    first_seen_at: Option<SystemTime>, // connection-deadline reference time
-    last_handshake: Option<SystemTime>, // idle-watchdog reference time
-}
-
-enum VpnConnectionState {
-    Disconnected,
-    Connecting,
-    Connected { last_handshake: SystemTime },
-}
-
-struct SystemState {
-    peers: Vec<PeerState>,            // flat list, NOT keyed by name
-    vpn_connection: VpnConnectionState,
-    config: VpnConfig,
-}
+    SystemState o-- PeerState : flat list
+    PeerState --> PeerConfig : immutable snapshot
+    PeerState --> DesiredState : operator intent
+    VpnConnectionState -- SystemState : aggregate health
 ```
 
 All peers start in `Disabled`. The system uses a **flat vector** rather than a
-hash map — lookup is O(n) but peer counts are small (< 50 typically).
+hash map — lookup is O(n) but peer counts are small (~50).
 
 ### 2.3 Connection State (global VPN health)
 
@@ -86,6 +91,26 @@ loop {
 ```
 
 Each cycle has **three phases**:
+
+```mermaid
+flowchart TD
+    subgraph Cycle["One poll cycle"]
+        direction TB
+        A["Phase A: Sync VPN connection state\nAggregate health from snapshot"]
+        B["Phase B: Health checks\nPer-peer watchdog timers"]
+        C["Phase C: Reconcile\nAlign on-interface ↔ desired"]
+        A --> B
+        B --> C
+    end
+    A -.->|"Connected?"| A2[("Connected\n{ last_handshake }")]
+    A -.->|"No recent HS"| A3[("Disconnected")]
+    B -->|"First handshake timeout"| B2["Disable peer\nnotify FirstHandshakeTimeout"]
+    B -->|"Idle past 3 min"| B3["Disable peer\nnotify IdleDisconnected"]
+    B -->|"HS just arrived"| B4["notify ConnectionEstablished"]
+    C -->|"Desired=Enabled, absent"| C2["Configure peer + route"]
+    C -->|"Desired=Disabled, present"| C3["Remove peer + delete route"]
+    C -->|"Already aligned"| C4["Skip"]
+```
 
 ### Phase A: Sync VPN Connection State
 
@@ -184,13 +209,17 @@ peer-specific route from unrelated routes to the same IP.
 
 Notifications flow through a dedicated channel:
 
-```
-monitor loop ──NotificationEvent──▶ notify_tx
-                                         │
-notify_handle (tokio::spawn) ◄───────────┘
-    │
-    ▼ send_message(chat_id, formatted_html, "HTML")
-    Telegram API
+```mermaid
+sequenceDiagram
+    participant M as Monitor loop
+    participant Ch as notify_tx channel
+    participant N as notify_handle (tokio::spawn)
+    participant T as Telegram API
+
+    M->>Ch: collect events after cycle
+    Ch->>N: drain NotificationEvent
+    N->>T: send_message(chat_id, html)
+    Note over T: failed sends logged, not retried
 ```
 
 The monitor collects events during a cycle and sends them all at once. A
@@ -248,25 +277,46 @@ Filter controlled by `RUST_LOG` env var (default: `info`).
 
 ## 10. Module Structure
 
+```mermaid
+graph TD
+    subgraph src["src/"]
+        main["main.rs\nentry · tracing · shutdown · routing"]
+        config["config.rs\nTOML parse · validate · defaults"]
+        state["state.rs\nSystemState · PeerState · enums"]
+        vpn["vpn.rs\nWireGuard netlink ops"]
+        auth["auth.rs\nwhitelist RwLock"]
+        tgram["telegram.rs\nBot API · long-poll"]
+
+        subgraph monitor["monitor/"]
+            m_mod["mod.rs\nspawn_monitor"]
+            m_types["types.rs\nPollSnapshot · events"]
+            m_phases["phases.rs\ncycle orchestration"]
+        end
+
+        subgraph handlers["handlers/"]
+            h_mod["mod.rs\nrouting · dispatch"]
+            h_cmd["commands.rs\n/start · enable · …"]
+            h_res["resolution.rs\nparsing · lookup · format"]
+            h_send["send.rs\nmessage delivery"]
+        end
+    end
+
+    main --> config
+    main --> state
+    main --> auth
+    main --> tgram
+    main --> m_mod
+    main --> h_mod
+    main --> vpn
+
+    m_mod --> m_types
+    m_mod --> m_phases
+    h_mod --> h_cmd
+    h_mod --> h_res
+    h_mod --> h_send
 ```
-src/
-├── main.rs              # Entry point, tracing init, shutdown, update routing
-├── config.rs            # TOML parsing, validation, defaults
-├── state.rs             # SystemState, PeerState, DesiredState, enums
-├── monitor/
-│   ├── mod.rs           # spawn_monitor entry point, re-exports, tests
-│   ├── types.rs         # PollSnapshot, NotificationKind, NotificationEvent,
-│   │                      MonitorHandle, WakeSignal
-│   └── phases.rs        # Loop orchestration + three-phase cycle logic
-├── vpn.rs               # WireGuard netlink operations (peer/route mgmt)
-├── auth.rs              # Global whitelist (RwLock)
-├── telegram.rs          # Telegram Bot API client + long-polling
-└── handlers/
-    ├── mod.rs           # Update routing, command dispatch
-    ├── commands.rs      # /start, /help, /status, /enable, /disable
-    ├── resolution.rs    # Command parsing, peer lookup, display formatting
-    └── send.rs          # HTML/text message sending, escaping
-```
+
+Each box shows the module filename and its primary responsibilities.
 
 ## 11. Key Design Decisions
 
@@ -287,27 +337,16 @@ src/
 
 ## 12. Flow Diagram
 
-```
-User command (/enable /disable)
-    │
-    ▼
-┌──────────────────┐     Wake signal
-│ Command Handler  ├──────────────────┐
-│ Updates desired  │                  │
-└──────────────────┘                  ▼
-                          ┌──────────────────────────┐
-                          │ Monitoring Loop (wakes)  │
-                          ├──────────────────────────┤
-                          │ Phase A: sync conn state │
-                          │ Phase B: health checks   │
-                          │ Phase C: reconcile       │
-                          └──────────────────────────┘
-                                      │
-                                      ▼
-                              ┌────────────────┐
-                              │   notify_tx    │
-                              ▼                ▼
-                      System aligned   Telegram notifications
+```mermaid
+flowchart TD
+    User["User command\n/enable or /disable"] --> Handler["Command Handler\nUpdates desired state"]
+    Handler -->|Wake signal| Loop["Monitoring Loop"]
+    Loop --> A["Phase A: sync conn state"]
+    A --> B["Phase B: health checks"]
+    B --> C["Phase C: reconcile"]
+    C --> Align["System aligned"]
+    C -->|Events| Notify["notify_tx"]
+    Notify --> TG["Telegram notifications"]
 ```
 
 ## 13. Error Handling Strategy
