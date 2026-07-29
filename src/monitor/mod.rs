@@ -271,7 +271,7 @@ mod tests {
         peer_with_hs.allowed_ips = allowed_ips;
         peer_with_hs.last_handshake = Some(hs_time);
 
-        let mock = TrackedMock::new();
+        let mut mock = TrackedMock::new();
         // Pre-populate the mock so PollSnapshot::capture returns our prepared
         // peer and route — simulating a healthy, established connection.
         mock.push_peer(peer_with_hs);

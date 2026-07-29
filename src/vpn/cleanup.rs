@@ -85,7 +85,7 @@ mod tests {
     /// Unconfigured peers on the interface are left alone.
     #[tokio::test]
     async fn test_cleanup_removes_configured_only() {
-        let mock = TrackedMock::new();
+        let mut mock = TrackedMock::new();
         let alice_pubkey = wg_pubkey([1u8; 32]);
 
         let cfg = crate::config::VpnConfig {
@@ -125,7 +125,7 @@ mod tests {
     /// peer itself was present on the interface.
     #[tokio::test]
     async fn test_cleanup_deletes_routes_for_all_configured_peers() {
-        let mock = TrackedMock::new();
+        let mut mock = TrackedMock::new();
         // Pre-populate mock routes so delete_route finds them and calls through.
         for cidr in &["10.0.0.2/32", "10.0.0.3/32"] {
             let parts: Vec<&str> = cidr.split('/').collect();
@@ -166,7 +166,7 @@ mod tests {
     /// Cleanup returns an error when the interface cannot be read.
     #[tokio::test]
     async fn test_cleanup_returns_error_on_read_failure() {
-        let mock = TrackedMock::with_read_error("simulated read failure");
+        let mock = TrackedMock::new().with_read_error("simulated read failure");
         let cfg = crate::config::VpnConfig {
             interface_name: "wg0".to_string(),
             peers: vec![PeerConfig {
@@ -187,7 +187,7 @@ mod tests {
     /// Routes are still cleaned up even when a peer could not be removed.
     #[tokio::test]
     async fn test_cleanup_continues_after_individual_failures() {
-        let mock = TrackedMock::with_write_error("simulated write failure");
+        let mut mock = TrackedMock::new().with_write_error("simulated write failure");
         // Pre-populate mock with the configured peer AND a matching route.
         mock.push_peer(defguard_wireguard_rs::peer::Peer::new(
             defguard_wireguard_rs::key::Key::new([1u8; 32]),

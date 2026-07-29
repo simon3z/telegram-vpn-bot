@@ -428,7 +428,7 @@ mod tests {
 
         let snapshot = snapshot_with_peer_and_route(&state, 0);
         // Pre-populate mock routes so delete_route can find and call through.
-        let mock = TrackedMock::new();
+        let mut mock = TrackedMock::new();
         let parsed: std::net::Ipv4Addr = state.peers[0]
             .config
             .allowed_ips
@@ -504,7 +504,7 @@ mod tests {
             .push(defguard_wireguard_rs::peer::Peer::new(carol_key));
         snapshot.routes.push(carol_route.clone());
 
-        let mock = TrackedMock::new();
+        let mut mock = TrackedMock::new();
         // Put Carol's route in the mock too so delete_route can locate it.
         mock.push_route(carol_route);
 
@@ -550,7 +550,7 @@ mod tests {
         let original_first_seen = SystemTime::now() - std::time::Duration::from_secs(50);
         state.peers[0].first_seen_at = Some(original_first_seen);
 
-        let mock = TrackedMock::with_write_error("simulated kernel error");
+        let mock = TrackedMock::new().with_write_error("simulated kernel error");
         let snapshot = PollSnapshot {
             iface_name: "wg0".to_string(),
             peers: vec![],

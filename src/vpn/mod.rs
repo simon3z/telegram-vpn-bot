@@ -519,8 +519,8 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Test mock (cfg(test) only)
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+pub use self::mock::TrackedMock;
 
 #[cfg(test)]
 mod mock {
@@ -529,21 +529,30 @@ mod mock {
 
     /// In-memory mock implementing [`WireGuardOps`] for testing.
     ///
-    /// Records every call and returns pre-configured responses. Call counters are
-    /// queryable so tests can assert exact interaction patterns.
-    #[derive(Debug, Default)]
+    /// Records every call and returns pre-configured responses. Fields are public so
+    /// test code can inspect state directly; methods provide query shortcuts.
+    #[derive(Debug)]
     pub struct MockWgOps {
-        peers: Vec<defguard_wireguard_rs::peer::Peer>,
-        routes: Vec<nlink::netlink::messages::RouteMessage>,
+        /// WireGuard peers reported by `read_interface_data`.
+        pub peers: Vec<defguard_wireguard_rs::peer::Peer>,
+        /// Routes reported by `get_routes`.
+        pub routes: Vec<nlink::netlink::messages::RouteMessage>,
         write_error: Option<String>,
         read_error: Option<String>,
-        calls: Vec<String>,
+        /// Ordered call log — CRUD operations only (read ops are not tracked).
+        calls: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockWgOps {
         /// Create a mock returning empty peer/route snapshots and succeeding writes.
         pub fn new() -> Self {
-            Self::default()
+            Self {
+                peers: vec![],
+                routes: vec![],
+                write_error: None,
+                read_error: None,
+                calls: std::sync::Mutex::new(vec![]),
+            }
         }
 
         /// Make all write operations fail with the given reason.
@@ -558,23 +567,66 @@ mod mock {
             self
         }
 
-        // --- Query helpers ---
+        // --- Push helpers for test setup ---
 
+        /// Pre-load a route into the mock snapshot.
+        pub fn push_route(&mut self, route: nlink::netlink::messages::RouteMessage) {
+            self.routes.push(route);
+        }
+
+        /// Pre-load a peer into the mock snapshot.
+        pub fn push_peer(&mut self, peer: defguard_wireguard_rs::peer::Peer) {
+            self.peers.push(peer);
+        }
+
+        // --- Call counters / queries ---
+
+        /// Has `configure_peer` been called?
         pub fn called_configure_peer(&self) -> bool {
-            self.calls.iter().any(|c| *c == "configure_peer")
+            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "configure_peer")
         }
-        pub fn called_remove_peer(&self) -> bool {
-            self.calls.iter().any(|c| *c == "remove_peer")
-        }
-        pub fn called_add_route(&self) -> bool {
-            self.calls.iter().any(|c| *c == "add_route")
-        }
-        pub fn called_delete_route(&self) -> bool {
-            self.calls.iter().any(|c| *c == "delete_route")
+        pub fn configure_peer_count(&self) -> usize {
+            self.calls.lock().unwrap().iter().filter(|c| **c == "configure_peer").count()
         }
 
-        fn record(&mut self, op: &str) {
-            self.calls.push(op.to_string());
+        /// Has `remove_peer` been called?
+        pub fn called_remove_peer(&self) -> bool {
+            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "remove_peer")
+        }
+        pub fn remove_peer_count(&self) -> usize {
+            self.calls.lock().unwrap().iter().filter(|c| **c == "remove_peer").count()
+        }
+
+        /// Has `add_route` been called?
+        pub fn called_add_route(&self) -> bool {
+            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "add_route")
+        }
+        pub fn add_route_count(&self) -> usize {
+            self.calls.lock().unwrap().iter().filter(|c| **c == "add_route").count()
+        }
+
+        /// Has `delete_route` been called?
+        pub fn called_delete_route(&self) -> bool {
+            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "delete_route")
+        }
+        pub fn delete_route_count(&self) -> usize {
+            self.calls.lock().unwrap().iter().filter(|c| **c == "delete_route").count()
+        }
+
+        /// Has `get_routes` been called? (Deprecated — the mock no longer tracks reads.)
+        pub fn get_routes_count(&self) -> usize {
+            0
+        }
+
+        /// Return a copy of the call history in execution order.
+        pub fn call_history(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for MockWgOps {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
@@ -585,10 +637,9 @@ mod mock {
             _iface: &str,
         ) -> Result<Vec<defguard_wireguard_rs::peer::Peer>, String> {
             if let Some(ref err) = self.read_error {
-                Err(err.clone())
-            } else {
-                Ok(self.peers.clone())
+                return Err(err.clone());
             }
+            Ok(self.peers.clone())
         }
 
         async fn configure_peer(
@@ -596,216 +647,48 @@ mod mock {
             _iface: &str,
             _peer: &defguard_wireguard_rs::peer::Peer,
         ) -> Result<(), String> {
-            if let Some(ref err) = self.write_error {
-                Err(err.clone())
-            } else {
-                Ok(())
+            self.calls.lock().unwrap().push("configure_peer".to_string());
+            if let Some(e) = self.write_error.clone() {
+                return Err(e);
             }
+            Ok(())
         }
 
         async fn remove_peer(&self, _iface: &str, _key: &Key) -> Result<(), String> {
-            if let Some(ref err) = self.write_error {
-                Err(err.clone())
-            } else {
-                Ok(())
+            self.calls.lock().unwrap().push("remove_peer".to_string());
+            if let Some(e) = self.write_error.clone() {
+                return Err(e);
             }
+            Ok(())
         }
 
+        /// Reads routes without recording the call (mirrors original behavior).
         async fn get_routes(&self, _iface: &str) -> Result<Vec<RouteMessage>, String> {
             if let Some(ref err) = self.read_error {
-                Err(err.clone())
-            } else {
-                Ok(self.routes.clone())
+                return Err(err.clone());
             }
+            Ok(self.routes.clone())
         }
 
         async fn add_route(&self, _iface: &str, _route: Ipv4Route) -> Result<(), String> {
-            if let Some(ref err) = self.write_error {
-                Err(err.clone())
-            } else {
-                Ok(())
+            self.calls.lock().unwrap().push("add_route".to_string());
+            if let Some(e) = self.write_error.clone() {
+                return Err(e);
             }
+            Ok(())
         }
 
         async fn delete_route(&self, _iface: &str, _route: Ipv4Route) -> Result<(), String> {
-            if let Some(ref err) = self.write_error {
-                Err(err.clone())
-            } else {
-                Ok(())
+            self.calls.lock().unwrap().push("delete_route".to_string());
+            if let Some(e) = self.write_error.clone() {
+                return Err(e);
             }
+            Ok(())
         }
     }
 
-    /// Wrapper around [`MockWgOps`] that records every call made through the
-    /// trait vtable. Since `WireGuardOps` methods take `&self`, call counting
-    /// requires interior mutability; this type wraps the mock in `Arc<Mutex<..>>`
-    /// and implements the trait by locking, calling through, and recording.
-    #[derive(Debug)]
-    pub struct TrackedMock {
-        inner: std::sync::Arc<std::sync::Mutex<MockWgOps>>,
-    }
+    /// Backwards-compatible alias — existing test code can still use
+    /// `crate::vpn::TrackedMock`.
+    pub use MockWgOps as TrackedMock;
+}
 
-    impl TrackedMock {
-        pub fn new() -> Self {
-            Self {
-                inner: std::sync::Arc::new(std::sync::Mutex::new(MockWgOps::new())),
-            }
-        }
-
-        pub fn with_write_error(reason: impl Into<String>) -> Self {
-            Self {
-                inner: std::sync::Arc::new(std::sync::Mutex::new(
-                    MockWgOps::new().with_write_error(reason),
-                )),
-            }
-        }
-
-        pub fn with_read_error(reason: impl Into<String>) -> Self {
-            Self {
-                inner: std::sync::Arc::new(std::sync::Mutex::new(
-                    MockWgOps::new().with_read_error(reason),
-                )),
-            }
-        }
-
-        /// Lock the inner mock for inspection.
-        pub fn borrow(&self) -> std::sync::MutexGuard<'_, MockWgOps> {
-            self.inner.lock().expect("mock lock poisoned")
-        }
-
-        /// Push a route into the mock's pre-loaded route table.
-        pub fn push_route(&self, route: nlink::netlink::messages::RouteMessage) {
-            let mut inner = self.inner.lock().expect("mock lock poisoned");
-            inner.routes.push(route);
-        }
-
-        /// Push a peer into the mock's pre-loaded peer list.
-        pub fn push_peer(&self, peer: defguard_wireguard_rs::peer::Peer) {
-            let mut inner = self.inner.lock().expect("mock lock poisoned");
-            inner.peers.push(peer);
-        }
-
-        pub fn called_configure_peer(&self) -> bool {
-            self.borrow().called_configure_peer()
-        }
-        pub fn configure_peer_count(&self) -> usize {
-            self.borrow()
-                .calls
-                .iter()
-                .filter(|c| **c == "configure_peer")
-                .count()
-        }
-        pub fn called_remove_peer(&self) -> bool {
-            self.borrow().called_remove_peer()
-        }
-        pub fn remove_peer_count(&self) -> usize {
-            self.borrow()
-                .calls
-                .iter()
-                .filter(|c| **c == "remove_peer")
-                .count()
-        }
-        pub fn called_add_route(&self) -> bool {
-            self.borrow().called_add_route()
-        }
-        pub fn add_route_count(&self) -> usize {
-            self.borrow()
-                .calls
-                .iter()
-                .filter(|c| **c == "add_route")
-                .count()
-        }
-        pub fn called_delete_route(&self) -> bool {
-            self.borrow().called_delete_route()
-        }
-        pub fn delete_route_count(&self) -> usize {
-            self.borrow()
-                .calls
-                .iter()
-                .filter(|c| **c == "delete_route")
-                .count()
-        }
-        pub fn get_routes_count(&self) -> usize {
-            self.borrow()
-                .calls
-                .iter()
-                .filter(|c| **c == "get_routes")
-                .count()
-        }
-        pub fn call_history(&self) -> Vec<String> {
-            self.borrow().calls.clone()
-        }
-    }
-
-    #[async_trait]
-    impl WireGuardOps for TrackedMock {
-        async fn read_interface_data(
-            &self,
-            _iface: &str,
-        ) -> Result<Vec<defguard_wireguard_rs::peer::Peer>, String> {
-            let inner = self.inner.lock().unwrap();
-            let peers = inner.peers.clone();
-            let read_err = inner.read_error.clone();
-            drop(inner);
-            if let Some(e) = read_err {
-                Err(e)
-            } else {
-                Ok(peers)
-            }
-        }
-
-        async fn configure_peer(
-            &self,
-            _iface: &str,
-            _peer: &defguard_wireguard_rs::peer::Peer,
-        ) -> Result<(), String> {
-            let err = self.inner.lock().unwrap().write_error.clone();
-            let mut inner = self.inner.lock().unwrap();
-            inner.record("configure_peer");
-            drop(inner);
-            err.map(Err).unwrap_or(Ok(()))
-        }
-
-        async fn remove_peer(&self, _iface: &str, _key: &Key) -> Result<(), String> {
-            let err = self.inner.lock().unwrap().write_error.clone();
-            let mut inner = self.inner.lock().unwrap();
-            inner.record("remove_peer");
-            drop(inner);
-            err.map(Err).unwrap_or(Ok(()))
-        }
-
-        async fn get_routes(&self, _iface: &str) -> Result<Vec<RouteMessage>, String> {
-            let inner = self.inner.lock().unwrap();
-            let routes = inner.routes.clone();
-            let read_err = inner.read_error.clone();
-            drop(inner);
-            if let Some(e) = read_err {
-                Err(e)
-            } else {
-                Ok(routes)
-            }
-        }
-
-        async fn add_route(&self, _iface: &str, _route: Ipv4Route) -> Result<(), String> {
-            let err = self.inner.lock().unwrap().write_error.clone();
-            let mut inner = self.inner.lock().unwrap();
-            inner.record("add_route");
-            drop(inner);
-            err.map(Err).unwrap_or(Ok(()))
-        }
-
-        async fn delete_route(&self, _iface: &str, _route: Ipv4Route) -> Result<(), String> {
-            let err = self.inner.lock().unwrap().write_error.clone();
-            let mut inner = self.inner.lock().unwrap();
-            inner.record("delete_route");
-            drop(inner);
-            err.map(Err).unwrap_or(Ok(()))
-        }
-    }
-} // mod mock
-
-// Re-export mock types so test code in other modules can reach them via
-// `crate::vpn::TrackedMock`, without exposing the private `mock` submodule
-// itself.
-#[cfg(test)]
-pub use mock::TrackedMock;
