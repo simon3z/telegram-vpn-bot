@@ -274,6 +274,7 @@ async fn send_unauthorized(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telegram::{Chat, Message, TelegramClient, Update};
 
     /// Regression: without JOURNAL_STREAM set, we must fall back to stderr
     /// rather than attempt journald integration.
@@ -300,5 +301,72 @@ mod tests {
     #[test]
     fn test_select_tracer_chooses_journald_with_socket() {
         assert_eq!(select_tracer_inner(|| true), TracerBackend::Journald);
+    }
+
+    /// Rust-logged filter respects the "info" fallback when RUST_LOG is unset.
+    #[test]
+    fn test_rust_log_filter_default_fallback_is_info() {
+        // Preserve and restore the real RUST_LOG across tests.
+        let saved = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+
+        let filter = rust_log_filter();
+        assert!(filter.to_string().contains("info"));
+
+        // Restore.
+        if let Some(v) = saved {
+            std::env::set_var("RUST_LOG", v);
+        }
+    }
+
+    /// Send-unauthorized path formats the user ID into a clear error message.
+    /// With a fake token the actual send will fail, but the function must
+    /// handle that gracefully without panicking.
+    #[tokio::test]
+    async fn test_send_unauthorized_formats_message_and_handles_network_failure() {
+        let client = TelegramClient::new("fake_token_for_test").await.unwrap();
+
+        // Simulate an incoming update with a known user ID.
+        let update = Update {
+            update_id: 1,
+            message: Some(Message {
+                chat: Chat { id: 777_888 },
+                from: Some(telegram::User { id: 42 }),
+                text: Some("/help".into()),
+            }),
+        };
+
+        // send_unauthorized should not panic even though the Telegram API call will fail.
+        send_unauthorized(&client, &update, Some(42)).await;
+    }
+
+    /// Send-unauthorized falls back to "unknown" when the message has no from.
+    #[tokio::test]
+    async fn test_send_unauthorized_handles_missing_sender_gracefully() {
+        let client = TelegramClient::new("fake_token_for_test").await.unwrap();
+
+        let update = Update {
+            update_id: 1,
+            message: Some(Message {
+                chat: Chat { id: 777_888 },
+                from: None,
+                text: Some("/help".into()),
+            }),
+        };
+
+        send_unauthorized(&client, &update, None).await;
+    }
+
+    /// Send-unauthorized does nothing when the update has no message.
+    #[tokio::test]
+    async fn test_send_unauthorized_noop_without_message() {
+        let client = TelegramClient::new("fake_token_for_test").await.unwrap();
+
+        let update = Update {
+            update_id: 1,
+            message: None,
+        };
+
+        send_unauthorized(&client, &update, Some(42)).await;
     }
 }

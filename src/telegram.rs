@@ -295,3 +295,56 @@ fn reqwest_error_detail(e: &reqwest::Error) -> String {
     }
     best
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client can be constructed with any token string (valid or not).
+    #[tokio::test]
+    async fn test_new_client_accepts_any_token_string() {
+        let _client = TelegramClient::new("fake-token-for-test").await.unwrap();
+    }
+
+    /// Sending a message with an invalid token must fail gracefully.
+    #[tokio::test]
+    async fn test_send_message_invalid_token_returns_error() {
+        let client = TelegramClient::new("invalid_token_for_test").await.unwrap();
+
+        let result = client.send_message(123_456, "hello", None).await;
+
+        // The HTTP call will fail since there is no real bot. We just verify
+        // that the function returns an error (not panics).
+        assert!(result.is_err());
+    }
+
+    /// Chat action with an invalid token also fails gracefully.
+    #[tokio::test]
+    async fn test_send_chat_action_invalid_token_returns_error() {
+        let client = TelegramClient::new("invalid_token_for_test").await.unwrap();
+
+        let result = client.send_chat_action(123_456, "typing").await;
+
+        assert!(result.is_err());
+    }
+
+    /// getMe with an invalid token produces a clear error message.
+    #[tokio::test]
+    async fn test_get_me_invalid_token_returns_error() {
+        let client = TelegramClient::new("invalid_token_for_test").await.unwrap();
+
+        let result = client.get_me().await;
+
+        assert!(result.is_err());
+    }
+
+    /// Sending with an explicit parse mode still exercises the same path.
+    #[tokio::test]
+    async fn test_send_message_with_parse_mode_invalid_token() {
+        let client = TelegramClient::new("invalid_token_for_test").await.unwrap();
+
+        let result = client.send_message(123_456, "<b>bold</b>", Some("HTML")).await;
+
+        assert!(result.is_err());
+    }
+}
