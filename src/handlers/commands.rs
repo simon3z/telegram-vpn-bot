@@ -86,19 +86,17 @@ pub(crate) async fn handle_enable(
     ctx: &mut PeerTransitionCtx<'_>,
     peer_name: Option<&str>,
 ) -> Result<(), String> {
-    let action = PeerAction::Enable;
-    perform_peer_transition(ctx, peer_name, &action).await
+    perform_peer_transition(ctx, true, peer_name).await
 }
 
 pub(crate) async fn handle_disable(
     ctx: &mut PeerTransitionCtx<'_>,
     peer_name: Option<&str>,
 ) -> Result<(), String> {
-    let action = PeerAction::Disable;
-    perform_peer_transition(ctx, peer_name, &action).await
+    perform_peer_transition(ctx, false, peer_name).await
 }
 
-/// Context bundle for peer enable/disable transitions. Collapses seven raw
+/// Context bundle for peer enable/disable transitions. Collapses six raw
 /// parameters into a single typed argument so each call site reads clearly.
 pub(crate) struct PeerTransitionCtx<'a> {
     pub(crate) client: &'a TelegramClient,
@@ -107,75 +105,21 @@ pub(crate) struct PeerTransitionCtx<'a> {
     pub(crate) user_id: i64,
     pub(crate) wake_tx: &'a mpsc::Sender<()>,
 }
-
-/// Per-action configuration for the shared enable/disable handler. Encodes
-/// the display strings, typing indicator, and short-circuit logic for each
-/// transition direction without exposing branching at every call site.
-pub(crate) enum PeerAction {
-    Enable,
-    Disable,
-}
-
-impl PeerAction {
-    fn target(&self) -> DesiredState {
-        match self {
-            Self::Enable => DesiredState::Enabled,
-            Self::Disable => DesiredState::Disabled,
-        }
-    }
-
-    /// Short-circuit when the peer is already in the target state.
-    /// Enable skips when active; disable skips when inactive.
-    fn skip_when_already_in_target(&self, is_active: bool) -> bool {
-        match self {
-            Self::Enable => is_active,
-            Self::Disable => !is_active,
-        }
-    }
-
-    /// Whether to send a "typing" chat action before processing.
-    fn show_typing(&self) -> bool {
-        matches!(self, Self::Enable)
-    }
-
-    fn status_message(&self, peer_name: &str) -> String {
-        match self {
-            Self::Enable => format!("ℹ️ Your peer \"{peer_name}\" is already active."),
-            Self::Disable => format!("ℹ️ Your peer \"{peer_name}\" is already inactive."),
-        }
-    }
-
-    fn success_message(&self, peer_name: &str, iface: &str) -> String {
-        let verb = match self {
-            Self::Enable => "Enabled",
-            Self::Disable => "Disabled",
-        };
-        let state = self.target().describe();
-        format!(
-            "<b>✅ Peer \"{peer_name}\" {verb}</b>\n\n\
-             Your peer is now {state} on interface `{iface}`.",
-        )
-    }
-}
-
-impl DesiredState {
-    fn describe(&self) -> &'static str {
-        match self {
-            DesiredState::Enabled => "active",
-            DesiredState::Disabled => "disabled",
-        }
-    }
-}
-
 /// Shared path for `/enable` and `/disable`: resolve the target peer, check its
 /// live presence on the interface, apply the desired-state change, wake the
 /// monitor, and send a confirmation. Returns Ok(()) whether the transition
 /// happened or was a no-op (peer already in the target state).
 pub(crate) async fn perform_peer_transition(
     ctx: &mut PeerTransitionCtx<'_>,
+    enable: bool,
     peer_name: Option<&str>,
-    action: &PeerAction,
 ) -> Result<(), String> {
+    let desired = if enable {
+        DesiredState::Enabled
+    } else {
+        DesiredState::Disabled
+    };
+
     // Resolve the peer. The returned reference gives us direct access to its
     // CIDR below, avoiding a second linear scan.
     let peer = match ctx.state.resolve_peer(ctx.user_id, peer_name) {
@@ -188,33 +132,42 @@ pub(crate) async fn perform_peer_transition(
     };
     // Borrow the peer's fields into owned locals so we can mutably borrow
     // `ctx.state` below without holding the immutable borrow on `peer`.
-    let peer_name_str = peer.config.name.clone();
-    let peer_cidr = peer.config.allowed_ips.clone();
-    let is_active = crate::vpn::get_peer_status(ctx.state.interface_name(), &peer_cidr)
-        .is_ok_and(|s| s.is_some());
+    let name = peer.config.name.clone();
+    let cidr = peer.config.allowed_ips.clone();
+    let is_active =
+        crate::vpn::get_peer_status(ctx.state.interface_name(), &cidr).is_ok_and(|s| s.is_some());
 
-    if action.skip_when_already_in_target(is_active) {
+    if (enable && is_active) || (!enable && !is_active) {
         let _ = send::send_html(
             ctx.client,
             ctx.chat_id,
-            &action.status_message(&peer_name_str),
+            &if enable {
+                format!("ℹ️ Your peer \"{name}\" is already active.")
+            } else {
+                format!("ℹ️ Your peer \"{name}\" is already inactive.")
+            },
         )
         .await;
         return Ok(());
     }
 
-    if action.show_typing() {
+    if enable {
         let _ = ctx.client.send_chat_action(ctx.chat_id, "typing").await;
     }
 
-    ctx.state
-        .set_desired_for_user(ctx.user_id, &peer_name_str, action.target());
+    ctx.state.set_desired_for_user(ctx.user_id, &name, desired);
     let _ = ctx.wake_tx.send(()).await;
 
     send::send_html(
         ctx.client,
         ctx.chat_id,
-        &action.success_message(&peer_name_str, ctx.state.interface_name()),
+        &format!(
+            "<b>✅ Peer \"{name}\" {}</b>\n\n\
+             Your peer is now {} on interface `{}`.",
+            if enable { "Enabled" } else { "Disabled" },
+            if enable { "active" } else { "disabled" },
+            ctx.state.interface_name(),
+        ),
     )
     .await
 }

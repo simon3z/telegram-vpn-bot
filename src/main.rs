@@ -16,15 +16,6 @@ use tracing::info;
 use tracing_journald::{self, Priority, PriorityMappings};
 use tracing_subscriber::prelude::*;
 
-/// Which tracing backend to install.
-#[derive(Debug, PartialEq)]
-pub(crate) enum TracerBackend {
-    /// Write structured entries to journald via the native protocol.
-    Journald,
-    /// Print unstructured lines to stderr (development fallback).
-    Stderr,
-}
-
 /// Build a log filter respecting $RUST_LOG; falls back to "info" when unset.
 fn rust_log_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -66,12 +57,8 @@ pub(crate) fn running_under_systemd_inner<F: FnOnce() -> bool>(has_journal_strea
 
 /// Decide which tracing subscriber to install given a probe function.
 #[cfg(test)]
-pub(crate) fn select_tracer_inner<F: FnOnce() -> bool>(has_journal_stream: F) -> TracerBackend {
-    if running_under_systemd_inner(has_journal_stream) {
-        TracerBackend::Journald
-    } else {
-        TracerBackend::Stderr
-    }
+pub(crate) fn select_tracer_inner<F: FnOnce() -> bool>(has_journal_stream: F) -> bool {
+    has_journal_stream()
 }
 
 /// Check whether we are running under systemd.
@@ -83,32 +70,21 @@ pub(crate) fn running_under_systemd() -> bool {
     std::env::var("JOURNAL_STREAM").is_ok()
 }
 
-/// Choose the tracing subscriber based on the execution environment.
-///
-/// Returns `Journald` when running under systemd, `Stderr` otherwise.
-pub(crate) fn select_tracer() -> TracerBackend {
-    if running_under_systemd() {
-        TracerBackend::Journald
-    } else {
-        TracerBackend::Stderr
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = tracing_subscriber::registry();
-    match select_tracer() {
-        TracerBackend::Journald => {
-            if let Ok(journal) = tracing_journald::layer() {
-                let journal = journal.with_priority_mappings(journald_priority_mappings());
-                let filter = rust_log_filter();
-                registry.with(journal).with(filter).init();
-            } else {
-                // journald unreachable — degrade gracefully instead of crashing.
-                init_stderr_tracer();
-            }
+
+    if running_under_systemd() {
+        if let Ok(journal) = tracing_journald::layer() {
+            let journal = journal.with_priority_mappings(journald_priority_mappings());
+            let filter = rust_log_filter();
+            registry.with(journal).with(filter).init();
+        } else {
+            // journald unreachable — degrade gracefully instead of crashing.
+            init_stderr_tracer();
         }
-        TracerBackend::Stderr => init_stderr_tracer(),
+    } else {
+        init_stderr_tracer();
     }
 
     let config_path = std::env::args()
@@ -290,17 +266,16 @@ mod tests {
         assert!(running_under_systemd_inner(|| true));
     }
 
-    /// Regression: select_tracer routes to the right backend based on
-    /// JOURNAL_STREAM presence.
+    /// Regression: without JOURNAL_STREAM, the select falls back to stderr.
     #[test]
     fn test_select_tracer_falls_back_to_stderr_without_socket() {
-        assert_eq!(select_tracer_inner(|| false), TracerBackend::Stderr);
+        assert!(!select_tracer_inner(|| false));
     }
 
-    /// Regression: select_tracer chooses journald when systemd is present.
+    /// Regression: with JOURNAL_STREAM set, systemd triggers journald.
     #[test]
     fn test_select_tracer_chooses_journald_with_socket() {
-        assert_eq!(select_tracer_inner(|| true), TracerBackend::Journald);
+        assert!(select_tracer_inner(|| true));
     }
 
     /// Rust-logged filter respects the "info" fallback when RUST_LOG is unset.
