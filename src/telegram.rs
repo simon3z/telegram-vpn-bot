@@ -343,7 +343,9 @@ mod tests {
     async fn test_send_message_with_parse_mode_invalid_token() {
         let client = TelegramClient::new("invalid_token_for_test").await.unwrap();
 
-        let result = client.send_message(123_456, "<b>bold</b>", Some("HTML")).await;
+        let result = client
+            .send_message(123_456, "<b>bold</b>", Some("HTML"))
+            .await;
 
         assert!(result.is_err());
     }

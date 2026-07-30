@@ -111,7 +111,8 @@ mod tests {
             id = 789012
             name = "Bob"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         init_whitelist_from_config(&cfg);
 
@@ -130,7 +131,8 @@ mod tests {
             r#"
             [whitelist]
             "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         init_whitelist_from_config(&cfg);
 
@@ -153,7 +155,8 @@ mod tests {
             id = 100200
             name = "Carol"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         init_whitelist_from_config(&cfg);
 

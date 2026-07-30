@@ -56,7 +56,7 @@ pub(crate) fn find_user_peers(state: &SystemState, user_id: i64) -> Vec<&crate::
 /// Format a single peer's row as HTML.
 pub(crate) fn format_single_peer(peer: &crate::state::PeerState, iface: &str) -> String {
     match crate::vpn::get_peer_status(iface, &peer.config.allowed_ips) {
-        Ok((true, info)) => {
+        Ok(Some(info)) => {
             let hs_line = match info.seconds_since_last_handshake() {
                 Some(secs) => format!("   Last handshake: {secs}s ago"),
                 None => "   Last handshake: never".to_string(),
@@ -66,7 +66,7 @@ pub(crate) fn format_single_peer(peer: &crate::state::PeerState, iface: &str) ->
                 peer.config.name, peer.config.allowed_ips, hs_line
             )
         }
-        Ok((false, _)) => format!(
+        Ok(None) => format!(
             "⏸️ <b>{}</b>\n   CIDR: <code>{}</code>\n   Status: inactive",
             peer.config.name, peer.config.allowed_ips
         ),
@@ -306,12 +306,12 @@ mod tests {
     /// peer with `last_handshake = UNIX_EPOCH` and no endpoint has never
     /// completed a handshake despite being configured on the interface.
     #[test]
-    fn test_active_peer_with_epoch_handshake_and_no_endpoint_shows_never() {
+    fn test_peer_status_epoch_handshake_and_no_endpoint_shows_never() {
         use std::time::SystemTime;
 
-        use crate::vpn::PeerInfo;
+        use crate::vpn::PeerStatus;
 
-        let info = PeerInfo::Active {
+        let info = PeerStatus {
             last_handshake: Some(SystemTime::UNIX_EPOCH),
             endpoint: None,
         };
@@ -327,13 +327,13 @@ mod tests {
     /// A peer with a real handshake timestamp AND a known endpoint must report
     /// elapsed seconds — confirms the endpoint guard does not over-match.
     #[test]
-    fn test_active_peer_with_real_handshake_and_endpoint_reports_elapsed() {
+    fn test_peer_status_real_handshake_and_endpoint_reports_elapsed() {
         use std::time::{Duration, SystemTime};
 
-        use crate::vpn::PeerInfo;
+        use crate::vpn::PeerStatus;
 
         let five_seconds_ago = SystemTime::now() - Duration::from_secs(5);
-        let info = PeerInfo::Active {
+        let info = PeerStatus {
             last_handshake: Some(five_seconds_ago),
             endpoint: Some("1.2.3.4:51820".parse().unwrap()),
         };

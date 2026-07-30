@@ -191,8 +191,7 @@ pub(crate) async fn perform_peer_transition(
     let peer_name_str = peer.config.name.clone();
     let peer_cidr = peer.config.allowed_ips.clone();
     let is_active = crate::vpn::get_peer_status(ctx.state.interface_name(), &peer_cidr)
-        .map(|(up, _)| up)
-        .unwrap_or(false);
+        .is_ok_and(|s| s.is_some());
 
     if action.skip_when_already_in_target(is_active) {
         let _ = send::send_html(

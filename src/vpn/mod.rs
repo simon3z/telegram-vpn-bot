@@ -160,60 +160,54 @@ pub fn find_matching_route(
 ///   lib-wg is the zero-sentinel wrapped into `UNIX_EPOCH`.
 /// - We therefore only compute elapsed seconds when **both** fields are
 ///   populated; otherwise the peer has never shaken hands.
+///
+/// Lightweight metadata about a WireGuard peer on the interface.
 #[derive(Debug, Clone)]
-pub enum PeerInfo {
-    Inactive,
-    Active {
-        last_handshake: Option<SystemTime>,
-        endpoint: Option<std::net::SocketAddr>,
-    },
+pub struct PeerStatus {
+    /// When the last successful handshake occurred. `None` if not yet known.
+    pub last_handshake: Option<SystemTime>,
+    /// Remote UDP endpoint the peer connects from.
+    pub endpoint: Option<std::net::SocketAddr>,
 }
 
-impl PeerInfo {
+impl PeerStatus {
     /// Elapsed seconds since the most recent handshake, or `None` if none has
     /// occurred. Returns `None` unless both `last_handshake` and `endpoint`
     /// are populated — a peer cannot complete a cryptographic handshake
     /// without first establishing a UDP connection, so a missing endpoint
     /// invalidates any `last_handshake` value the kernel reports.
     pub fn seconds_since_last_handshake(&self) -> Option<u64> {
-        let t = match self {
-            Self::Active {
-                last_handshake: Some(t),
-                endpoint: Some(_),
-            } => *t,
-            _ => return None,
-        };
-        SystemTime::now()
-            .duration_since(t)
-            .ok()
-            .map(|d| d.as_secs())
+        let t = self.last_handshake?;
+        if self.endpoint.is_some() {
+            SystemTime::now()
+                .duration_since(t)
+                .ok()
+                .map(|d| d.as_secs())
+        } else {
+            None
+        }
     }
 }
 
-/// Get the active state and metadata of a peer on the interface.
-///
-/// Uses the real kernel directly — intended for command-handler status checks
-/// where constructing a trait object would be overhead.
-pub fn get_peer_status(iface: &str, allowed_ips: &str) -> Result<(bool, PeerInfo), String> {
+/// Query whether a peer is on the interface and, if so, return its handshake
+/// metadata. Uses the real kernel directly — intended for command-handler
+/// status checks where constructing a trait object would be overhead.
+pub fn get_peer_status(iface: &str, allowed_ips: &str) -> Result<Option<PeerStatus>, String> {
     let api = WGApi::<Kernel>::new(iface).map_err(|e| format!("failed to open {iface}: {e}"))?;
     let host = api
         .read_interface_data()
         .map_err(|e| format!("failed to read {iface}: {e}"))?;
-    let target_cidr = allowed_ips.to_string();
     for peer in host.peers.values() {
         for allowed in &peer.allowed_ips {
-            if allowed.to_string() == target_cidr {
-                return Ok((
-                    true,
-                    PeerInfo::Active {
-                        last_handshake: peer.last_handshake,
-                        endpoint: peer.endpoint,
-                    },
-                ));
+            if allowed.to_string() == allowed_ips {
+                return Ok(Some(PeerStatus {
+                    last_handshake: peer.last_handshake,
+                    endpoint: peer.endpoint,
+                }));
             }
         }
     }
-    Ok((false, PeerInfo::Inactive))
+    Ok(None)
 }
 
 /// Parse a CIDR string into an IP address and prefix length.
@@ -583,34 +577,70 @@ mod mock {
 
         /// Has `configure_peer` been called?
         pub fn called_configure_peer(&self) -> bool {
-            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "configure_peer")
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str() == "configure_peer")
         }
         pub fn configure_peer_count(&self) -> usize {
-            self.calls.lock().unwrap().iter().filter(|c| **c == "configure_peer").count()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| **c == "configure_peer")
+                .count()
         }
 
         /// Has `remove_peer` been called?
         pub fn called_remove_peer(&self) -> bool {
-            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "remove_peer")
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str() == "remove_peer")
         }
         pub fn remove_peer_count(&self) -> usize {
-            self.calls.lock().unwrap().iter().filter(|c| **c == "remove_peer").count()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| **c == "remove_peer")
+                .count()
         }
 
         /// Has `add_route` been called?
         pub fn called_add_route(&self) -> bool {
-            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "add_route")
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str() == "add_route")
         }
         pub fn add_route_count(&self) -> usize {
-            self.calls.lock().unwrap().iter().filter(|c| **c == "add_route").count()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| **c == "add_route")
+                .count()
         }
 
         /// Has `delete_route` been called?
         pub fn called_delete_route(&self) -> bool {
-            self.calls.lock().unwrap().iter().any(|c| c.as_str() == "delete_route")
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str() == "delete_route")
         }
         pub fn delete_route_count(&self) -> usize {
-            self.calls.lock().unwrap().iter().filter(|c| **c == "delete_route").count()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| **c == "delete_route")
+                .count()
         }
 
         /// Has `get_routes` been called? (Deprecated — the mock no longer tracks reads.)
@@ -647,7 +677,10 @@ mod mock {
             _iface: &str,
             _peer: &defguard_wireguard_rs::peer::Peer,
         ) -> Result<(), String> {
-            self.calls.lock().unwrap().push("configure_peer".to_string());
+            self.calls
+                .lock()
+                .unwrap()
+                .push("configure_peer".to_string());
             if let Some(e) = self.write_error.clone() {
                 return Err(e);
             }
@@ -691,4 +724,3 @@ mod mock {
     /// `crate::vpn::TrackedMock`.
     pub use MockWgOps as TrackedMock;
 }
-
