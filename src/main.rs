@@ -70,8 +70,35 @@ pub(crate) fn running_under_systemd() -> bool {
     std::env::var("JOURNAL_STREAM").is_ok()
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Build a Tokio multi-threaded runtime.  Worker threads are named
+/// "tg-vpn-bot-worker-<N>" so they appear clearly in `ps` / `top`.
+fn make_runtime() -> tokio::runtime::Runtime {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    static COUNTER: AtomicIsize = AtomicIsize::new(0);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn(|| {
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("tg-vpn-bot-worker-{id}")
+        })
+        .build()
+        .expect("failed to build tokio runtime")
+}
+
+/// Entry point.
+fn main() -> std::io::Result<()> {
+    let rt = make_runtime();
+    match rt.block_on(async_main()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = tracing_subscriber::registry();
 
     if running_under_systemd() {
