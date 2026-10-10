@@ -61,14 +61,9 @@ async fn run_monitor_loop(
     let mut next_wake = tokio::time::Instant::now() + poll_interval;
 
     loop {
-        // Wait for either the poll timer or an immediate wake signal.
-        tokio::select! {
-            _ = tokio::time::sleep_until(next_wake) => {}
-            _ = wake_rx.recv() => {}
-        }
-
-        // Drain any accumulated wake signals.
-        while wake_rx.try_recv().is_ok() {}
+        // Wait for either the poll timer or an immediate wake signal, then
+        // drain any accumulated wake signals.
+        wait_for_next_cycle(&next_wake, wake_rx).await;
 
         // Run the full cycle: sync actual state, health checks, then reconcile.
         let events = {
@@ -77,15 +72,37 @@ async fn run_monitor_loop(
         };
 
         // Dispatch events to users via Telegram.
-        for ev in events {
-            if let Err(e) = notify_tx.send(ev).await {
-                warn!("notification channel closed: error={e}");
-                break;
-            }
-        }
+        dispatch_events(&notify_tx, events).await;
 
         // Schedule the next poll cycle.
         next_wake = tokio::time::Instant::now() + poll_interval;
+    }
+}
+
+/// Wait for the next cycle to begin: either the poll timer fires or a wake
+/// signal arrives. Drains any wake signals that accumulated in the channel.
+async fn wait_for_next_cycle(
+    next_wake: &tokio::time::Instant,
+    wake_rx: &mut mpsc::Receiver<WakeSignal>,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep_until(*next_wake) => {}
+        _ = wake_rx.recv() => {}
+    }
+    while wake_rx.try_recv().is_ok() {}
+}
+
+/// Forward health/reconcile events to users via the notification channel.
+/// Stops draining on the first send failure (channel closed).
+async fn dispatch_events(
+    notify_tx: &mpsc::Sender<NotificationEvent>,
+    events: Vec<NotificationEvent>,
+) {
+    for ev in events {
+        if let Err(e) = notify_tx.send(ev).await {
+            warn!("notification channel closed: error={e}");
+            break;
+        }
     }
 }
 

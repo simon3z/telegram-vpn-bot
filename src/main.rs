@@ -86,80 +86,56 @@ fn make_runtime() -> tokio::runtime::Runtime {
         .expect("failed to build tokio runtime")
 }
 
-/// Entry point.
-fn main() -> std::io::Result<()> {
-    let rt = make_runtime();
-    match rt.block_on(async_main()) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string();
-            Err(std::io::Error::other(msg))
-        }
-    }
-}
-
-async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
-    let registry = tracing_subscriber::registry();
-
+/// Install the tracing subscriber: journald when running under systemd,
+/// stderr otherwise.
+fn init_tracing() {
     if running_under_systemd() {
         if let Ok(journal) = tracing_journald::layer() {
             let journal = journal.with_priority_mappings(journald_priority_mappings());
             let filter = rust_log_filter();
-            registry.with(journal).with(filter).init();
-        } else {
-            // journald unreachable — degrade gracefully instead of crashing.
-            init_stderr_tracer();
+            tracing_subscriber::registry()
+                .with(journal)
+                .with(filter)
+                .init();
+            return;
         }
-    } else {
-        init_stderr_tracer();
+        // journald unreachable — degrade gracefully instead of crashing.
     }
+    init_stderr_tracer();
+}
 
+/// Load config, authenticate with Telegram, and log startup info.
+async fn bootstrap(
+) -> Result<(telegram::TelegramClient, config::Config), Box<dyn std::error::Error>> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config.toml".to_string());
 
     let cfg = config::Config::load(&config_path)?;
     let token = cfg.get_token()?;
-
     auth::init_whitelist_from_config(&cfg);
 
     let client = telegram::TelegramClient::new(&token).await?;
     let bot_info = client.get_me().await?;
     info!("bot running as @{}", bot_info.username);
-
     info!("loaded config from: {config_path}");
     info!("managing WireGuard interface: {}", cfg.vpn.interface_name);
     info!("peers configured: {}", cfg.vpn.peers.len());
 
-    // Build the single source of truth. All peers start disabled.
-    let system_state = Arc::new(RwLock::new(state::SystemState::from_config(
-        cfg.vpn.clone(),
-    )));
+    Ok((client, cfg))
+}
 
-    // Remove any leftover peers/routes left over from a previous crash or
-    // unclean shutdown. Runs before the monitor starts so we don't race with
-    // it.
-    let kernel_ops = Arc::new(vpn::KernelWgOps);
-    vpn::cleanup_managed_peers(&*kernel_ops, &cfg.vpn).await?;
-
-    // Set up communication channels.
-    let (wake_tx, wake_rx) = mpsc::channel(32);
-
-    // Spawn the monitoring loop. It owns SystemState and performs reconciliation.
-    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<monitor::NotificationEvent>(16);
-    let monitor_handle = monitor::spawn_monitor(
-        system_state.clone(),
-        wake_rx,
-        notify_tx.clone(),
-        kernel_ops.clone(),
-    );
-
-    // Drain notification events from the monitor and send them via Telegram.
-    let client_for_notify = client.clone();
-    let notify_handle = tokio::spawn(async move {
+/// Spawn the task that drains monitor notifications and forwards them to
+/// Telegram.
+fn spawn_notifier(
+    client: &telegram::TelegramClient,
+    mut notify_rx: mpsc::Receiver<monitor::NotificationEvent>,
+) -> tokio::task::JoinHandle<()> {
+    let client = client.clone();
+    tokio::spawn(async move {
         while let Some(ev) = notify_rx.recv().await {
             let message = ev.kind.format_message(&ev.peer_name);
-            if let Err(e) = client_for_notify
+            if let Err(e) = client
                 .send_message(ev.user_id, &message, Some("HTML"))
                 .await
             {
@@ -169,16 +145,26 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!("failed to send notification to {user_id} ({peer}): {error}",);
             }
         }
-    });
+    })
+}
 
-    // Clone the sender for use by the poller task.
-    let wake_tx_for_poller = wake_tx.clone();
-    let client_for_handler = client.clone();
-    let state_for_handler = system_state.clone();
+/// Spawn the update-polling task. Each update is processed under a fresh
+/// state lock and wakes the monitor via `wake_tx`.
+fn spawn_poller(
+    client: &telegram::TelegramClient,
+    timeout: u64,
+    limit: u64,
+    state: Arc<RwLock<state::SystemState>>,
+    wake_tx: mpsc::Sender<()>,
+) -> tokio::task::JoinHandle<()> {
+    let client = client.clone();
 
-    let poller_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
+        let client_for_handler = client.clone();
+        let state_for_handler = state.clone();
+        let wake_tx_for_poller = wake_tx.clone();
         client
-            .run_polling(cfg.polling.timeout, cfg.polling.limit, move |update| {
+            .run_polling(timeout, limit, move |update| {
                 let client_h = client_for_handler.clone();
                 let state_h = state_for_handler.clone();
                 let wake_tx_local = wake_tx_for_poller.clone();
@@ -188,8 +174,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await
             .expect("poller failed")
-    });
+    })
+}
 
+/// Block until SIGINT or SIGTERM arrives, then log which signal fired.
+async fn wait_for_shutdown() {
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .expect("failed to install SIGINT handler");
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -203,13 +192,58 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             info!("received SIGTERM, shutting down...");
         }
     }
+}
 
-    info!("cleaning up...");
+/// Entry point.
+fn main() -> std::io::Result<()> {
+    let rt = make_runtime();
+    match rt.block_on(async_main()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
+    let (client, cfg) = bootstrap().await?;
+
+    // Build the single source of truth. All peers start disabled.
+    let system_state = Arc::new(RwLock::new(state::SystemState::from_config(
+        cfg.vpn.clone(),
+    )));
+
+    // Remove any leftover peers/routes left over from a previous crash or
+    // unclean shutdown. Runs before the monitor starts so we don't race with
+    // it.
+    let kernel_ops = Arc::new(vpn::KernelWgOps);
+    vpn::cleanup_managed_peers(&*kernel_ops, &cfg.vpn).await?;
+
+    // Set up communication channels and background tasks.
+    let (wake_tx, wake_rx) = mpsc::channel(32);
+    let (notify_tx, notify_rx) = tokio::sync::mpsc::channel::<monitor::NotificationEvent>(16);
+    let monitor_handle = monitor::spawn_monitor(
+        system_state.clone(),
+        wake_rx,
+        notify_tx.clone(),
+        kernel_ops.clone(),
+    );
+    let notify_handle = spawn_notifier(&client, notify_rx);
+    let poller_handle = spawn_poller(
+        &client,
+        cfg.polling.timeout,
+        cfg.polling.limit,
+        system_state,
+        wake_tx.clone(),
+    );
+
+    wait_for_shutdown().await;
 
     // 1. Stop all background tasks FIRST so they cannot modify state while
     //    we tear down the interface.
-    drop(wake_tx);
-    drop(notify_tx);
+    drop((wake_tx, notify_tx));
     notify_handle.abort();
     poller_handle.abort();
     monitor_handle.abort();
@@ -220,7 +254,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("shutdown complete");
-
     Ok(())
 }
 

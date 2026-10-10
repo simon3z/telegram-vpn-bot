@@ -114,12 +114,6 @@ pub(crate) async fn perform_peer_transition(
     enable: bool,
     peer_name: Option<&str>,
 ) -> Result<(), String> {
-    let desired = if enable {
-        DesiredState::Enabled
-    } else {
-        DesiredState::Disabled
-    };
-
     // Resolve the peer. The returned reference gives us direct access to its
     // CIDR below, avoiding a second linear scan.
     let peer = match ctx.state.resolve_peer(ctx.user_id, peer_name) {
@@ -137,17 +131,8 @@ pub(crate) async fn perform_peer_transition(
     let is_active =
         crate::vpn::get_peer_status(ctx.state.interface_name(), &cidr).is_ok_and(|s| s.is_some());
 
-    if (enable && is_active) || (!enable && !is_active) {
-        let _ = send::send_html(
-            ctx.client,
-            ctx.chat_id,
-            &if enable {
-                format!("ℹ️ Your peer \"{name}\" is already active.")
-            } else {
-                format!("ℹ️ Your peer \"{name}\" is already inactive.")
-            },
-        )
-        .await;
+    if is_active == enable {
+        send_already_state(ctx, &name, enable).await;
         return Ok(());
     }
 
@@ -155,7 +140,36 @@ pub(crate) async fn perform_peer_transition(
         let _ = ctx.client.send_chat_action(ctx.chat_id, "typing").await;
     }
 
-    ctx.state.set_desired_for_user(ctx.user_id, &name, desired);
+    apply_transition(ctx, &name, enable).await
+}
+
+/// Reply that the peer is already in the requested state.
+async fn send_already_state(ctx: &PeerTransitionCtx<'_>, name: &str, enable: bool) {
+    let _ = send::send_html(
+        ctx.client,
+        ctx.chat_id,
+        &if enable {
+            format!("ℹ️ Your peer \"{name}\" is already active.")
+        } else {
+            format!("ℹ️ Your peer \"{name}\" is already inactive.")
+        },
+    )
+    .await;
+}
+
+/// Update the desired state, wake the monitor, and send the confirmation.
+async fn apply_transition(
+    ctx: &mut PeerTransitionCtx<'_>,
+    name: &str,
+    enable: bool,
+) -> Result<(), String> {
+    let desired = if enable {
+        DesiredState::Enabled
+    } else {
+        DesiredState::Disabled
+    };
+
+    ctx.state.set_desired_for_user(ctx.user_id, name, desired);
     let _ = ctx.wake_tx.send(()).await;
 
     send::send_html(

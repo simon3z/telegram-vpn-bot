@@ -108,8 +108,6 @@ impl SystemState {
     }
 }
 
-// --- Helper constants ---
-
 /// Seconds after which an idle connected VPN is considered dead. Matches
 /// WireGuard's ~2 minute handshake renewal cycle.
 pub const IDLE_TIMEOUT_SECS: u64 = 180;

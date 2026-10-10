@@ -218,18 +218,8 @@ impl TelegramClient {
             String::from("request failed")
         })?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "(could not read body)".to_string());
-            tracing::error!(
-                "getUpdates returned HTTP {}: {}\nBody: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or("unknown"),
-                body_text,
-            );
+        if !resp.status().is_success() {
+            log_bad_get_updates_status(resp).await;
             return Err("non-success HTTP response".into());
         }
 
@@ -280,8 +270,6 @@ impl TelegramClient {
     }
 }
 
-// --- Error helpers ---
-
 /// Extract the deepest, most informative error message from a reqwest error chain.
 fn reqwest_error_detail(e: &reqwest::Error) -> String {
     let mut best = format!("{e}");
@@ -294,6 +282,21 @@ fn reqwest_error_detail(e: &reqwest::Error) -> String {
         source = err.source();
     }
     best
+}
+
+/// Log an unsuccessful getUpdates response at error level.
+async fn log_bad_get_updates_status(resp: reqwest::Response) {
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| "(could not read body)".to_string());
+    tracing::error!(
+        "getUpdates returned HTTP {}: {}\nBody: {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("unknown"),
+        body_text,
+    );
 }
 
 #[cfg(test)]

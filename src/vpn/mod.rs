@@ -10,10 +10,6 @@ use nlink::netlink::messages::RouteMessage;
 use nlink::netlink::route::Ipv4Route;
 use tracing::{debug, info};
 
-// ---------------------------------------------------------------------------
-// Trait
-// ---------------------------------------------------------------------------
-
 /// Abstraction over WireGuard peer management and Linux netlink route
 /// operations. Implemented by [`KernelWgOps`] for real kernel interactions
 /// and by mocks for testing.
@@ -48,10 +44,6 @@ pub trait WireGuardOps: Send + Sync {
     /// Delete an IP route from the interface.
     async fn delete_route(&self, iface: &str, route: Ipv4Route) -> Result<(), String>;
 }
-
-// ---------------------------------------------------------------------------
-// Kernel implementation
-// ---------------------------------------------------------------------------
 
 /// Real WireGuard + netlink backend. Delegates to lib-wg and nlink.
 #[derive(Debug)]
@@ -114,10 +106,6 @@ impl WireGuardOps for KernelWgOps {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper predicates
-// ---------------------------------------------------------------------------
-
 fn is_target_absent(error_text: &str) -> bool {
     error_text.contains("not found")
         || error_text.contains("No such device")
@@ -127,10 +115,6 @@ fn is_target_absent(error_text: &str) -> bool {
 fn is_target_already_present(error_text: &str) -> bool {
     error_text.contains("already") || error_text.contains("exists")
 }
-
-// ---------------------------------------------------------------------------
-// Public VPN helpers (still available to other modules)
-// ---------------------------------------------------------------------------
 
 /// Look up a route in a dumped table by destination IPv4 address and prefix
 /// length. The kernel's fib-lookup cannot distinguish our peer-specific route
@@ -378,10 +362,6 @@ pub async fn delete_route(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,7 +492,6 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 pub use self::mock::TrackedMock;
 
@@ -561,8 +540,6 @@ mod mock {
             self
         }
 
-        // --- Push helpers for test setup ---
-
         /// Pre-load a route into the mock snapshot.
         pub fn push_route(&mut self, route: nlink::netlink::messages::RouteMessage) {
             self.routes.push(route);
@@ -572,8 +549,6 @@ mod mock {
         pub fn push_peer(&mut self, peer: defguard_wireguard_rs::peer::Peer) {
             self.peers.push(peer);
         }
-
-        // --- Call counters / queries ---
 
         /// Has `configure_peer` been called?
         pub fn called_configure_peer(&self) -> bool {

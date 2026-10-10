@@ -153,6 +153,82 @@ mod tests {
     use crate::state::DesiredState;
     use crate::test_fixtures::*;
 
+    /// Helper: build a WireGuard peer with the given key byte and handshake.
+    fn make_peer(
+        key_byte: u8,
+        last_handshake: Option<SystemTime>,
+    ) -> defguard_wireguard_rs::peer::Peer {
+        let mut peer = defguard_wireguard_rs::peer::Peer::new(
+            defguard_wireguard_rs::key::Key::new([key_byte; 32]),
+        );
+        peer.last_handshake = last_handshake;
+        peer
+    }
+
+    /// Helper: run process_one_peer with the standard 60s/180s thresholds.
+    async fn run_peer(
+        ps: &mut PeerState,
+        peer: &defguard_wireguard_rs::peer::Peer,
+        now: SystemTime,
+    ) -> Option<NotificationEvent> {
+        process_one_peer(
+            ps,
+            peer,
+            now,
+            Duration::from_secs(60),
+            Duration::from_secs(180),
+        )
+        .await
+    }
+
+    /// Helper: two-peer (alice+bob) SystemState used by skip tests.
+    fn make_alice_bob_state() -> SystemState {
+        crate::state::SystemState::from_config(crate::config::VpnConfig {
+            interface_name: "wg0".into(),
+            peers: vec![
+                crate::config::PeerConfig {
+                    telegram_id: ALICE_ID,
+                    name: "alice".into(),
+                    allowed_ips: "10.0.0.2/32".into(),
+                    public_key: defguard_wireguard_rs::key::Key::new([1u8; 32]).to_string(),
+                },
+                crate::config::PeerConfig {
+                    telegram_id: BOB_ID,
+                    name: "bob".into(),
+                    allowed_ips: "10.0.0.3/32".into(),
+                    public_key: defguard_wireguard_rs::key::Key::new([2u8; 32]).to_string(),
+                },
+            ],
+            ..Default::default()
+        })
+    }
+
+    /// Helper: snapshot with alice fresh (5s ago) and bob stale (300s ago).
+    fn make_alice_fresh_bob_stale_snapshot(state: &SystemState, now: SystemTime) -> PollSnapshot {
+        let alice_key: defguard_wireguard_rs::key::Key = state.peers[0]
+            .config
+            .public_key
+            .as_str()
+            .try_into()
+            .unwrap();
+        let bob_key: defguard_wireguard_rs::key::Key = state.peers[1]
+            .config
+            .public_key
+            .as_str()
+            .try_into()
+            .unwrap();
+        let mut alice_peer = defguard_wireguard_rs::peer::Peer::new(alice_key);
+        alice_peer.last_handshake = Some(now - Duration::from_secs(5));
+        let mut bob_peer = defguard_wireguard_rs::peer::Peer::new(bob_key);
+        // Bob's handshake is stale — would trigger idle if he were enabled.
+        bob_peer.last_handshake = Some(now - Duration::from_secs(300));
+        PollSnapshot {
+            iface_name: "wg0".into(),
+            peers: vec![alice_peer, bob_peer],
+            routes: vec![],
+        }
+    }
+
     /// Regression: process_one_peer records first_seen_at on initial encounter.
     #[tokio::test]
     async fn test_process_one_peer_marks_first_seen_on_first_encounter() {
@@ -289,46 +365,19 @@ mod tests {
         ps.first_seen_at = Some(now - Duration::from_secs(10));
 
         // First call: no handshake yet → no notification.
-        let key1 = defguard_wireguard_rs::key::Key::new([1u8; 32]);
-        let peer1 = defguard_wireguard_rs::peer::Peer::new(key1);
-        let evt1 = process_one_peer(
-            &mut ps,
-            &peer1,
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(180),
-        )
-        .await;
-        assert!(evt1.is_none());
+        let peer1 = make_peer(1, None);
+        assert!(run_peer(&mut ps, &peer1, now).await.is_none());
 
         // Second call: handshake arrives → one notification.
-        let key2 = defguard_wireguard_rs::key::Key::new([2u8; 32]);
-        let mut peer2 = defguard_wireguard_rs::peer::Peer::new(key2);
-        peer2.last_handshake = Some(now - Duration::from_secs(5));
-        let evt2 = process_one_peer(
-            &mut ps,
-            &peer2,
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(180),
-        )
-        .await;
-        let evt2 = evt2.expect("expected connection established notification");
+        let peer2 = make_peer(2, Some(now - Duration::from_secs(5)));
+        let evt2 = run_peer(&mut ps, &peer2, now)
+            .await
+            .expect("expected connection established notification");
         assert_eq!(evt2.kind, NotificationKind::ConnectionEstablished);
 
         // Third call: still same handshake → no more notifications.
-        let key3 = defguard_wireguard_rs::key::Key::new([3u8; 32]);
-        let mut peer3 = defguard_wireguard_rs::peer::Peer::new(key3);
-        peer3.last_handshake = Some(now - Duration::from_secs(5));
-        let evt3 = process_one_peer(
-            &mut ps,
-            &peer3,
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(180),
-        )
-        .await;
-        assert!(evt3.is_none());
+        let peer3 = make_peer(3, Some(now - Duration::from_secs(5)));
+        assert!(run_peer(&mut ps, &peer3, now).await.is_none());
     }
 
     /// Idle timeout uses last_handshake specifically, NOT first_seen_at.
@@ -574,54 +623,13 @@ mod tests {
     /// enter the processing pipeline.
     #[tokio::test]
     async fn test_health_checks_skip_disabled_peers() {
-        use super::super::types::PollSnapshot;
-
-        let mut state = crate::state::SystemState::from_config(crate::config::VpnConfig {
-            interface_name: "wg0".into(),
-            peers: vec![
-                crate::config::PeerConfig {
-                    telegram_id: ALICE_ID,
-                    name: "alice".into(),
-                    allowed_ips: "10.0.0.2/32".into(),
-                    public_key: defguard_wireguard_rs::key::Key::new([1u8; 32]).to_string(),
-                },
-                crate::config::PeerConfig {
-                    telegram_id: BOB_ID,
-                    name: "bob".into(),
-                    allowed_ips: "10.0.0.3/32".into(),
-                    public_key: defguard_wireguard_rs::key::Key::new([2u8; 32]).to_string(),
-                },
-            ],
-            ..Default::default()
-        });
+        let mut state = make_alice_bob_state();
 
         // Alice is enabled; Bob is disabled.
         state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
 
-        // Snapshot has both peers present (matching their configured pubkeys).
-        let alice_key: defguard_wireguard_rs::key::Key = state.peers[0]
-            .config
-            .public_key
-            .as_str()
-            .try_into()
-            .unwrap();
-        let bob_key: defguard_wireguard_rs::key::Key = state.peers[1]
-            .config
-            .public_key
-            .as_str()
-            .try_into()
-            .unwrap();
         let now = SystemTime::now();
-        let mut alice_peer = defguard_wireguard_rs::peer::Peer::new(alice_key);
-        alice_peer.last_handshake = Some(now - Duration::from_secs(5));
-        let mut bob_peer = defguard_wireguard_rs::peer::Peer::new(bob_key);
-        // Bob's handshake is stale — would trigger idle if he were enabled.
-        bob_peer.last_handshake = Some(now - Duration::from_secs(300));
-        let snapshot = PollSnapshot {
-            iface_name: "wg0".into(),
-            peers: vec![alice_peer, bob_peer],
-            routes: vec![],
-        };
+        let snapshot = make_alice_fresh_bob_stale_snapshot(&state, now);
 
         let events = run_health_checks(
             &mut state,

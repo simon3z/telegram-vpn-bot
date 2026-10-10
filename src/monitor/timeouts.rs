@@ -96,10 +96,6 @@ pub(crate) fn check_idle_timeout(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,8 +109,6 @@ mod tests {
         ps.last_handshake = Some(SystemTime::now() - Duration::from_secs(5));
         ps
     }
-
-    // --- check_first_handshake_timeout ---
 
     /// No timeout when the peer was observed recently.
     #[test]
@@ -176,8 +170,6 @@ mod tests {
             _ => panic!("wrong notification kind"),
         }
     }
-
-    // --- check_idle_timeout ---
 
     /// No timeout when the session is still active.
     #[test]

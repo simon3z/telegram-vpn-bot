@@ -27,56 +27,53 @@ pub async fn handle_update(
 
     let text = msg.text.as_deref().unwrap_or("");
 
-    if let Some((cmd, args)) = resolution::parse_command(text) {
-        match cmd.as_str() {
-            "/start" => commands::handle_start(client, chat_id, state, user_id).await?,
-            "/help" => commands::handle_help(client, chat_id).await?,
-            "/status" => commands::handle_status(client, chat_id, state, user_id).await?,
-            "/enable" => {
-                let mut ctx = commands::PeerTransitionCtx {
-                    client,
-                    chat_id,
-                    state,
-                    user_id,
-                    wake_tx,
-                };
-                commands::handle_enable(&mut ctx, args.first().map(|s| s.as_str())).await?
-            }
-            "/disable" => {
-                let mut ctx = commands::PeerTransitionCtx {
-                    client,
-                    chat_id,
-                    state,
-                    user_id,
-                    wake_tx,
-                };
-                commands::handle_disable(&mut ctx, args.first().map(|s| s.as_str())).await?
-            }
-            other => {
-                send::send_html(
-                    client,
-                    chat_id,
-                    &format!("Unknown command: {other}. {}", send::UNKNOWN_COMMAND_MSG),
-                )
-                .await?;
-            }
+    match resolution::parse_command(text) {
+        Some((cmd, args)) => {
+            let mut ctx = commands::PeerTransitionCtx {
+                client,
+                chat_id,
+                state,
+                user_id,
+                wake_tx,
+            };
+            dispatch_command(&mut ctx, cmd, args).await
         }
-    } else {
-        send::send_html(
-            client,
-            chat_id,
-            "<b>🔐 Telegram VPN Bot</b>\n\n\
-            Send a text message or use commands:\n\
-            • /start — Welcome message + your peers\n\
-            • /help — Show available commands\n\
-            • /status — List all your VPN peers\n\
-            • /enable [name] — Activate a peer\n\
-            • /disable [name] — Deactivate a peer",
-        )
-        .await?;
+        None => send::send_html(client, chat_id, WELCOME_HELP_HTML).await,
     }
+}
 
-    Ok(())
+/// Shown when a non-command message arrives.
+const WELCOME_HELP_HTML: &str = "<b>🔐 Telegram VPN Bot</b>\n\n\
+    Send a text message or use commands:\n\
+    • /start — Welcome message + your peers\n\
+    • /help — Show available commands\n\
+    • /status — List all your VPN peers\n\
+    • /enable [name] — Activate a peer\n\
+    • /disable [name] — Deactivate a peer";
+
+/// Route a parsed command to its handler.
+async fn dispatch_command(
+    ctx: &mut commands::PeerTransitionCtx<'_>,
+    cmd: String,
+    args: Vec<String>,
+) -> Result<(), String> {
+    let peer_name = args.first().map(|s| s.as_str());
+
+    match cmd.as_str() {
+        "/start" => commands::handle_start(ctx.client, ctx.chat_id, ctx.state, ctx.user_id).await,
+        "/help" => commands::handle_help(ctx.client, ctx.chat_id).await,
+        "/status" => commands::handle_status(ctx.client, ctx.chat_id, ctx.state, ctx.user_id).await,
+        "/enable" => commands::handle_enable(ctx, peer_name).await,
+        "/disable" => commands::handle_disable(ctx, peer_name).await,
+        other => {
+            send::send_html(
+                ctx.client,
+                ctx.chat_id,
+                &format!("Unknown command: {other}. {}", send::UNKNOWN_COMMAND_MSG),
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(test)]

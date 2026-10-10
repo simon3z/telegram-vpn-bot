@@ -23,8 +23,6 @@ pub(crate) async fn reconcile_all(
     }
 }
 
-// --- Per-peer reconciliation ---
-
 /// Ensure a desired-enabled peer is present on the interface with a matching
 /// route. Skips when everything is already aligned.
 async fn reconcile_enabled_peer(
@@ -32,30 +30,22 @@ async fn reconcile_enabled_peer(
     snapshot: &PollSnapshot,
     ops: &(dyn vpn::WireGuardOps + Send + Sync),
 ) {
-    let iface_name = snapshot.iface_name();
-    let cidr = &ps.config.allowed_ips;
-    let pubkey = &ps.config.public_key;
-    let peer_name = &ps.config.name;
+    let plan = PeerPlan {
+        iface_name: snapshot.iface_name(),
+        peer_name: &ps.config.name,
+        pubkey: &ps.config.public_key,
+        cidr: &ps.config.allowed_ips,
+        peer_present: snapshot.peer_on_iface(&ps.config.public_key),
+        route_present: snapshot.route_for_cidr(&ps.config.allowed_ips),
+    };
 
     // Already online? Skip to avoid EEXIST noise.
-    if snapshot.peer_on_iface(pubkey) && snapshot.route_for_cidr(cidr) {
-        debug!("reconciled: already online: peer={peer_name}, cidr={cidr}");
+    if plan.peer_present && plan.route_present {
+        debug!("reconciled: already online: peer={}", plan.peer_name);
         return;
     }
 
-    let peer_present = snapshot.peer_on_iface(pubkey);
-    let route_present = snapshot.route_for_cidr(cidr);
-
-    let outcome = configure_peer_and_route(
-        ops,
-        iface_name,
-        peer_name,
-        pubkey,
-        cidr,
-        peer_present,
-        route_present,
-    )
-    .await;
+    let outcome = configure_peer_and_route(ops, &plan).await;
 
     match outcome {
         Ok(()) => {
@@ -64,40 +54,51 @@ async fn reconcile_enabled_peer(
             // route, the connection never went down — overwriting the
             // observation timestamps would lose legitimate history and
             // potentially fire a spurious ConnectionEstablished notification.
-            if !peer_present {
+            if !plan.peer_present {
                 ps.first_seen_at = Some(SystemTime::now());
                 ps.last_handshake = None;
             }
-            info!("reconciled: enabled + added: peer={peer_name}, cidr={cidr}");
+            info!("reconciled: enabled + added: peer={}", plan.peer_name);
         }
         Err(reason) => {
-            warn!("reconciliation failed: peer={peer_name}, cidr={cidr}, reason={reason}");
+            warn!(
+                "reconciliation failed: peer={}, cidr={}, reason={reason}",
+                plan.peer_name, plan.cidr
+            );
         }
     }
+}
+
+/// Per-peer reconciliation plan: identity plus snapshot-derived presence
+/// flags. Collapses the shared arguments into one typed value.
+struct PeerPlan<'a> {
+    iface_name: &'a str,
+    peer_name: &'a str,
+    pubkey: &'a str,
+    cidr: &'a str,
+    peer_present: bool,
+    route_present: bool,
 }
 
 /// Attempt to add a WireGuard peer and its host route to the interface.
 /// Returns Ok(()) when both succeed, or an error describing which step failed.
 async fn configure_peer_and_route(
     ops: &(dyn vpn::WireGuardOps + Send + Sync),
-    iface_name: &str,
-    peer_name: &str,
-    pubkey: &str,
-    cidr: &str,
-    peer_present: bool,
-    route_present: bool,
+    plan: &PeerPlan<'_>,
 ) -> Result<(), String> {
-    let wg_ok = if peer_present {
+    let wg_ok = if plan.peer_present {
         true
     } else {
-        vpn::ensure_wg_peer(ops, iface_name, pubkey, peer_name, cidr)
+        vpn::ensure_wg_peer(ops, plan.iface_name, plan.pubkey, plan.peer_name, plan.cidr)
             .await
             .is_ok()
     };
-    let route_ok = if route_present {
+    let route_ok = if plan.route_present {
         true
     } else {
-        vpn::ensure_route(ops, iface_name, cidr).await.is_ok()
+        vpn::ensure_route(ops, plan.iface_name, plan.cidr)
+            .await
+            .is_ok()
     };
 
     match (wg_ok, route_ok) {
@@ -115,27 +116,36 @@ async fn reconcile_disabled_peer(
     snapshot: &PollSnapshot,
     ops: &(dyn vpn::WireGuardOps + Send + Sync),
 ) {
-    let iface_name = snapshot.iface_name();
-    let cidr = &ps.config.allowed_ips;
-    let pubkey = &ps.config.public_key;
-    let peer_name = ps.config.name.clone();
+    let plan = PeerPlan {
+        iface_name: snapshot.iface_name(),
+        peer_name: &ps.config.name,
+        pubkey: &ps.config.public_key,
+        cidr: &ps.config.allowed_ips,
+        peer_present: snapshot.peer_on_iface(&ps.config.public_key),
+        route_present: snapshot.route_for_cidr(&ps.config.allowed_ips),
+    };
 
     // Already gone? Skip to avoid logging noise every cycle.
-    if !snapshot.peer_on_iface(pubkey) && !snapshot.route_for_cidr(cidr) {
-        debug!("reconciled: already offline: peer={peer_name}, cidr={cidr}");
+    if !plan.peer_present && !plan.route_present {
+        debug!("reconciled: already offline: peer={}", plan.peer_name);
         return;
     }
 
-    let peer_present = snapshot.peer_on_iface(pubkey);
-    let route_present = snapshot.route_for_cidr(cidr);
+    let (wg_err, route_err) = remove_peer_and_route(ops, &plan).await;
+    if wg_err.is_none() && route_err.is_none() {
+        ps.first_seen_at = None;
+        ps.last_handshake = None;
+    }
+    log_removal_outcome(&plan, wg_err, route_err);
+}
 
-    let (wg_err, route_err) =
-        remove_peer_and_route(ops, iface_name, pubkey, cidr, peer_present, route_present).await;
-
+/// Log the outcome of a peer/route removal.
+fn log_removal_outcome(plan: &PeerPlan<'_>, wg_err: Option<String>, route_err: Option<String>) {
+    let peer_name = plan.peer_name;
+    let cidr = plan.cidr;
+    let iface_name = plan.iface_name;
     match (wg_err, route_err) {
         (None, None) => {
-            ps.first_seen_at = None;
-            ps.last_handshake = None;
             info!("reconciled: disabled + removed: peer={peer_name}, cidr={cidr}");
         }
         (Some(wge), Some(re)) => {
@@ -161,19 +171,19 @@ async fn reconcile_disabled_peer(
 /// Returns any errors that occurred during removal.
 async fn remove_peer_and_route(
     ops: &(dyn vpn::WireGuardOps + Send + Sync),
-    iface_name: &str,
-    pubkey: &str,
-    cidr: &str,
-    peer_present: bool,
-    route_present: bool,
+    plan: &PeerPlan<'_>,
 ) -> (Option<String>, Option<String>) {
-    let wg_err = if peer_present {
-        vpn::remove_wg_peer(ops, iface_name, pubkey).await.err()
+    let wg_err = if plan.peer_present {
+        vpn::remove_wg_peer(ops, plan.iface_name, plan.pubkey)
+            .await
+            .err()
     } else {
         None
     };
-    let route_err = if route_present {
-        vpn::delete_route(ops, iface_name, cidr).await.err()
+    let route_err = if plan.route_present {
+        vpn::delete_route(ops, plan.iface_name, plan.cidr)
+            .await
+            .err()
     } else {
         None
     };
@@ -183,7 +193,7 @@ async fn remove_peer_and_route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::DesiredState;
+    use crate::state::{DesiredState, PeerState};
     use crate::test_fixtures::*;
     use crate::vpn::TrackedMock;
     use std::time::SystemTime;
@@ -202,6 +212,15 @@ mod tests {
         }
     }
 
+    /// Helper: build the netlink route message for a /32 CIDR like "10.0.0.4/32".
+    fn route_for_cidr(cidr: &str) -> nlink::netlink::messages::RouteMessage {
+        let ip: std::net::Ipv4Addr = cidr.split('/').next().unwrap().parse().unwrap();
+        nlink::netlink::messages::RouteMessageBuilder::new()
+            .ipv4()
+            .destination(std::net::IpAddr::V4(ip), 32)
+            .build()
+    }
+
     /// Helper: build a snapshot with a peer AND a matching route.
     fn snapshot_with_peer_and_route(state: &SystemState, idx: usize) -> PollSnapshot {
         let pubkey = &state.peers[idx].config.public_key;
@@ -209,21 +228,71 @@ mod tests {
             .as_str()
             .try_into()
             .unwrap_or_else(|_| defguard_wireguard_rs::key::Key::new([0u8; 32]));
-        let parsed: std::net::Ipv4Addr = state.peers[idx]
-            .config
-            .allowed_ips
-            .split('/')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .expect("valid CIDR");
-        let route = nlink::netlink::messages::RouteMessageBuilder::new()
-            .ipv4()
-            .destination(std::net::IpAddr::V4(parsed), 32)
-            .build();
+        let route = route_for_cidr(&state.peers[idx].config.allowed_ips);
         PollSnapshot {
             iface_name: "wg0".to_string(),
             peers: vec![defguard_wireguard_rs::peer::Peer::new(key)],
             routes: vec![route],
+        }
+    }
+
+    /// Helper: build a snapshot with a single peer and the given handshake time.
+    fn snapshot_with_peer_hs(
+        state: &SystemState,
+        idx: usize,
+        last_handshake: Option<SystemTime>,
+    ) -> PollSnapshot {
+        let pubkey = &state.peers[idx].config.public_key;
+        let key: defguard_wireguard_rs::key::Key = pubkey.as_str().try_into().unwrap();
+        let mut peer = defguard_wireguard_rs::peer::Peer::new(key);
+        peer.last_handshake = last_handshake;
+        PollSnapshot {
+            iface_name: "wg0".to_string(),
+            peers: vec![peer],
+            routes: vec![],
+        }
+    }
+
+    /// Helper: build a PeerConfig for a test peer with a unique key byte.
+    fn make_peer_config(
+        telegram_id: i64,
+        name: &str,
+        allowed_ips: &str,
+        key_byte: u8,
+    ) -> crate::config::PeerConfig {
+        crate::config::PeerConfig {
+            telegram_id,
+            name: name.to_string(),
+            allowed_ips: allowed_ips.to_string(),
+            public_key: defguard_wireguard_rs::key::Key::new([key_byte; 32]).to_string(),
+        }
+    }
+
+    /// Helper: verify the expected multi-peer call pattern.
+    fn assert_expected_call_pattern(mock: &TrackedMock) {
+        assert!(
+            mock.called_add_route(),
+            "At least one add_route call expected"
+        );
+        assert!(
+            mock.called_configure_peer(),
+            "Bob must be configured (enabled + missing)"
+        );
+        assert!(
+            mock.called_remove_peer(),
+            "Carol must be removed (disabled + present)"
+        );
+        assert!(mock.called_delete_route(), "Carol's route must be deleted");
+
+        // Call order: all enables happen before disables (iteration order).
+        let history = mock.call_history();
+        let last_configure = history.iter().rposition(|c| c.as_str() == "configure_peer");
+        let first_remove = history.iter().position(|c| c.as_str() == "remove_peer");
+        if let (Some(lc), Some(fr)) = (last_configure, first_remove) {
+            assert!(
+                lc < fr,
+                "all configure_peer calls should precede remove_peer in iteration order"
+            );
         }
     }
 
@@ -311,11 +380,9 @@ mod tests {
         assert_eq!(state.peers[0].first_seen_at, Some(original_first_seen),);
     }
 
-    /// Regression: when an enabled peer is on the interface but its route is
-    /// missing, reconcile fixes only the route. It must NOT reset observation
-    /// timers — those measure connection health, not infrastructure state.
-    #[tokio::test]
-    async fn test_reconcile_route_only_fix_calls_add_route_not_configure() {
+    /// Helper: alice enabled with known observation timers (first seen 100s
+    /// ago, last handshake 30s ago).
+    fn enabled_alice_with_timers() -> (SystemState, SystemTime, SystemTime) {
         let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
         let alice = state
             .peers
@@ -323,12 +390,20 @@ mod tests {
             .find(|p| p.config.name == "alice")
             .unwrap();
         alice.desired = DesiredState::Enabled;
-
         let now = SystemTime::now();
         let original_first_seen = now - std::time::Duration::from_secs(100);
         alice.first_seen_at = Some(original_first_seen);
         let hs_time = now - std::time::Duration::from_secs(30);
         alice.last_handshake = Some(hs_time);
+        (state, original_first_seen, hs_time)
+    }
+
+    /// Regression: when an enabled peer is on the interface but its route is
+    /// missing, reconcile fixes only the route. It must NOT reset observation
+    /// timers — those measure connection health, not infrastructure state.
+    #[tokio::test]
+    async fn test_reconcile_route_only_fix_calls_add_route_not_configure() {
+        let (mut state, original_first_seen, hs_time) = enabled_alice_with_timers();
 
         // Snapshot: peer is on the interface, but route is absent.
         let snapshot = snapshot_with_peer(&state, 0);
@@ -377,20 +452,11 @@ mod tests {
         alice.first_seen_at = None;
         alice.last_handshake = None;
 
-        // Use Alice's actual configured pubkey so the snapshot matches.
-        let alice_pubkey: defguard_wireguard_rs::key::Key = state.peers[0]
-            .config
-            .public_key
-            .as_str()
-            .try_into()
-            .expect("valid pubkey");
-        let mut peer_with_hs = defguard_wireguard_rs::peer::Peer::new(alice_pubkey);
-        peer_with_hs.last_handshake = Some(SystemTime::now() - std::time::Duration::from_secs(5));
-        let snapshot = PollSnapshot {
-            iface_name: "wg0".to_string(),
-            peers: vec![peer_with_hs],
-            routes: vec![],
-        };
+        let snapshot = snapshot_with_peer_hs(
+            &state,
+            0,
+            Some(SystemTime::now() - std::time::Duration::from_secs(5)),
+        );
 
         let events = crate::monitor::health::run_health_checks(
             &mut state,
@@ -429,18 +495,7 @@ mod tests {
         let snapshot = snapshot_with_peer_and_route(&state, 0);
         // Pre-populate mock routes so delete_route can find and call through.
         let mut mock = TrackedMock::new();
-        let parsed: std::net::Ipv4Addr = state.peers[0]
-            .config
-            .allowed_ips
-            .split('/')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .expect("valid CIDR");
-        let route = nlink::netlink::messages::RouteMessageBuilder::new()
-            .ipv4()
-            .destination(std::net::IpAddr::V4(parsed), 32)
-            .build();
-        mock.push_route(route);
+        mock.push_route(route_for_cidr(&state.peers[0].config.allowed_ips));
 
         reconcile_all(&mut state, &snapshot, &mock).await;
 
@@ -465,38 +520,30 @@ mod tests {
         let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
         state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
 
-        // Add Bob (enabled, absent from interface).
-        let bob_cfg = crate::config::PeerConfig {
-            telegram_id: 222,
-            name: "bob".to_string(),
-            allowed_ips: "10.0.0.3/32".to_string(),
-            public_key: defguard_wireguard_rs::key::Key::new([2u8; 32]).to_string(),
-        };
-        state.peers.push(crate::state::PeerState::new(bob_cfg));
+        // Add Bob (enabled, absent from interface) and Carol (disabled, present).
+        state.peers.push(PeerState::new(make_peer_config(
+            222,
+            "bob",
+            "10.0.0.3/32",
+            2,
+        )));
         state.set_desired_for_user(222, "bob", DesiredState::Enabled);
-
-        // Add Carol (disabled, present on interface).
-        let carol_cfg = crate::config::PeerConfig {
-            telegram_id: 333,
-            name: "carol".to_string(),
-            allowed_ips: "10.0.0.4/32".to_string(),
-            public_key: defguard_wireguard_rs::key::Key::new([3u8; 32]).to_string(),
-        };
-        state.peers.push(crate::state::PeerState::new(carol_cfg));
+        state.peers.push(PeerState::new(make_peer_config(
+            333,
+            "carol",
+            "10.0.0.4/32",
+            3,
+        )));
         state.set_desired_for_user(333, "carol", DesiredState::Disabled);
 
-        // Snapshot: Alice's peer AND Carol's peer are on the interface.
-        // Both snapshots have no routes — but for Carol we need the route
-        // present in the snapshot so reconcile attempts deletion.
-        let carol_pubkey = &state.peers[2].config.public_key;
-        let carol_key: defguard_wireguard_rs::key::Key =
-            carol_pubkey.as_str().try_into().expect("valid pubkey");
-        let carol_cidr = &state.peers[2].config.allowed_ips;
-        let carol_ip: std::net::Ipv4Addr = carol_cidr.split('/').next().unwrap().parse().unwrap();
-        let carol_route = nlink::netlink::messages::RouteMessageBuilder::new()
-            .ipv4()
-            .destination(std::net::IpAddr::V4(carol_ip), 32)
-            .build();
+        // Snapshot: Alice's and Carol's peers on the interface; Carol's route present.
+        let carol_key = state.peers[2]
+            .config
+            .public_key
+            .as_str()
+            .try_into()
+            .expect("valid pubkey");
+        let carol_route = route_for_cidr(&state.peers[2].config.allowed_ips);
 
         let mut snapshot = snapshot_with_peer(&state, 0);
         snapshot
@@ -510,35 +557,7 @@ mod tests {
 
         reconcile_all(&mut state, &snapshot, &mock).await;
 
-        // Alice: peer present, route missing → add_route called, configure_peer NOT.
-        assert!(
-            mock.called_add_route(),
-            "At least one add_route call expected"
-        );
-
-        // Bob: enabled + absent → must call configure_peer and add_route.
-        assert!(
-            mock.called_configure_peer(),
-            "Bob must be configured (enabled + missing)"
-        );
-
-        // Carol: disabled + present → must call remove_peer and delete_route.
-        assert!(
-            mock.called_remove_peer(),
-            "Carol must be removed (disabled + present)"
-        );
-        assert!(mock.called_delete_route(), "Carol's route must be deleted");
-
-        // Verify call order: all enables happen before disables (iteration order).
-        let history = mock.call_history();
-        let last_configure = history.iter().rposition(|c| c.as_str() == "configure_peer");
-        let first_remove = history.iter().position(|c| c.as_str() == "remove_peer");
-        if let (Some(lc), Some(fr)) = (last_configure, first_remove) {
-            assert!(
-                lc < fr,
-                "all configure_peer calls should precede remove_peer in iteration order"
-            );
-        }
+        assert_expected_call_pattern(&mock);
     }
 
     /// When VPN writes all fail, reconcile logs warnings but does not panic.

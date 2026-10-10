@@ -12,8 +12,8 @@ pub(crate) use phases::spawn_monitor;
 mod tests {
     use super::phases::{run_full_cycle_inner, sync_vpn_connection};
     use super::reconcile::reconcile_all;
-    use super::types::PollSnapshot;
-    use crate::state::{DesiredState, VpnConnectionState};
+    use super::types::{NotificationEvent, PollSnapshot};
+    use crate::state::{DesiredState, SystemState, VpnConnectionState};
     use crate::test_fixtures::*;
     use crate::vpn::TrackedMock;
     use std::time::{Duration, SystemTime};
@@ -68,6 +68,62 @@ mod tests {
         // No crash means success.
     }
 
+    /// Helper: run one full monitor cycle with the standard 60s/180s timeouts.
+    async fn run_full_cycle(state: &mut SystemState, mock: &TrackedMock) -> Vec<NotificationEvent> {
+        run_full_cycle_inner(
+            state,
+            "wg0",
+            &Duration::from_secs(60),
+            &Duration::from_secs(180),
+            mock,
+        )
+        .await
+    }
+
+    /// Helper: alice peer with desired=Enabled and VPN disconnected.
+    fn make_enabled_alice_state() -> SystemState {
+        let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
+        state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
+        state.vpn_connection = VpnConnectionState::Disconnected;
+        state
+    }
+
+    /// Helper: build a WireGuard peer (with the given handshake time) and the
+    /// matching host route for peer index 0's config.
+    fn aligned_peer_and_route(
+        state: &SystemState,
+        hs_time: SystemTime,
+    ) -> (
+        defguard_wireguard_rs::peer::Peer,
+        nlink::netlink::messages::RouteMessage,
+    ) {
+        let pubkey = &state.peers[0].config.public_key;
+        let key: defguard_wireguard_rs::key::Key =
+            pubkey.as_str().try_into().expect("valid pubkey");
+        let cidr_ip: std::net::Ipv4Addr = state.peers[0]
+            .config
+            .allowed_ips
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let route = nlink::netlink::messages::RouteMessageBuilder::new()
+            .ipv4()
+            .destination(std::net::IpAddr::V4(cidr_ip), 32)
+            .build();
+        let allowed_ips: Vec<defguard_wireguard_rs::net::IpAddrMask> = state.peers[0]
+            .config
+            .allowed_ips
+            .split(',')
+            .filter_map(|cidr| cidr.trim().parse().ok())
+            .collect();
+        let mut peer = defguard_wireguard_rs::peer::Peer::new(key);
+        peer.allowed_ips = allowed_ips;
+        peer.last_handshake = Some(hs_time);
+        (peer, route)
+    }
+
     /// When reconcile sees the peer is already online, it skips configuration
     /// and does NOT reset first_seen_at — the peer was observed before this cycle.
     #[tokio::test]
@@ -83,24 +139,10 @@ mod tests {
         alice.first_seen_at = Some(original_first_seen);
 
         // Build a snapshot whose peer key matches Alice's configured pubkey.
-        let pubkey = &state.peers[0].config.public_key;
-        let key: defguard_wireguard_rs::key::Key =
-            pubkey.as_str().try_into().expect("valid pubkey");
-        let cidr_ip: std::net::Ipv4Addr = state.peers[0]
-            .config
-            .allowed_ips
-            .split('/')
-            .next()
-            .unwrap()
-            .parse()
-            .expect("valid CIDR");
-        let route = nlink::netlink::messages::RouteMessageBuilder::new()
-            .ipv4()
-            .destination(std::net::IpAddr::V4(cidr_ip), 32)
-            .build();
+        let (_, route) = aligned_peer_and_route(&state, original_first_seen);
         let snapshot = PollSnapshot {
             iface_name: "wg0".to_string(),
-            peers: vec![defguard_wireguard_rs::peer::Peer::new(key)],
+            peers: vec![aligned_peer_and_route(&state, original_first_seen).0],
             routes: vec![route],
         };
         let mock = TrackedMock::new();
@@ -120,18 +162,8 @@ mod tests {
         let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
         state.vpn_connection = VpnConnectionState::Disconnected;
 
-        let pubkey = &state.peers[0].config.public_key;
-        let key: defguard_wireguard_rs::key::Key =
-            pubkey.as_str().try_into().expect("valid pubkey");
-        let allowed_ips: Vec<defguard_wireguard_rs::net::IpAddrMask> = state.peers[0]
-            .config
-            .allowed_ips
-            .split(',')
-            .filter_map(|cidr| cidr.trim().parse().ok())
-            .collect();
-        let mut peer_with_hs = defguard_wireguard_rs::peer::Peer::new(key);
-        peer_with_hs.allowed_ips = allowed_ips;
-        peer_with_hs.last_handshake = Some(SystemTime::now() - Duration::from_secs(5));
+        let hs_time = SystemTime::now() - Duration::from_secs(5);
+        let (peer_with_hs, _) = aligned_peer_and_route(&state, hs_time);
         let snapshot = PollSnapshot {
             iface_name: "wg0".to_string(),
             peers: vec![peer_with_hs],
@@ -180,36 +212,22 @@ mod tests {
     /// attempted activation.
     #[tokio::test]
     async fn test_full_cycle_activates_missing_peer_through_all_phases() {
-        let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
-        state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
-        state.vpn_connection = VpnConnectionState::Disconnected;
-
+        let mut state = make_enabled_alice_state();
         let mock = TrackedMock::new();
-        // Snapshot is captured from the mock — empty peers/routes simulate
-        // "interface up but no peers configured".
+        // Mock starts empty — "interface up but no peers configured".
 
-        let events = run_full_cycle_inner(
-            &mut state,
-            "wg0",
-            &Duration::from_secs(60),
-            &Duration::from_secs(180),
-            &mock,
-        )
-        .await;
+        let events = run_full_cycle(&mut state, &mock).await;
 
-        // Phase A (sync): disconnected because no peer on interface.
+        // Phase A (sync): no peer on interface → disconnected.
         assert!(
             matches!(state.vpn_connection, VpnConnectionState::Disconnected),
             "sync should mark disconnected when no peer present"
         );
-
-        // Phase B (health): no events because peer isn't seen yet — there is
-        // nothing to check against.
+        // Phase B (health): peer unseen → no events.
         assert!(
             events.is_empty(),
             "no health events expected when peer absent from snapshot"
         );
-
         // Phase C (reconcile): slow path must attempt both operations.
         assert!(
             mock.called_configure_peer(),
@@ -233,8 +251,7 @@ mod tests {
     /// events, reconcile makes zero calls.
     #[tokio::test]
     async fn test_full_cycle_is_noop_when_peer_already_aligned() {
-        let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
-        state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
+        let mut state = make_enabled_alice_state();
 
         let original_first_seen = SystemTime::now() - Duration::from_secs(100);
         let hs_time = SystemTime::now() - Duration::from_secs(10);
@@ -246,58 +263,25 @@ mod tests {
         alice.first_seen_at = Some(original_first_seen);
         alice.last_handshake = Some(hs_time);
 
-        let pubkey = &state.peers[0].config.public_key;
-        let key: defguard_wireguard_rs::key::Key =
-            pubkey.as_str().try_into().expect("valid pubkey");
-        let cidr_ip: std::net::Ipv4Addr = state.peers[0]
-            .config
-            .allowed_ips
-            .split('/')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let route = nlink::netlink::messages::RouteMessageBuilder::new()
-            .ipv4()
-            .destination(std::net::IpAddr::V4(cidr_ip), 32)
-            .build();
-        let allowed_ips: Vec<defguard_wireguard_rs::net::IpAddrMask> = state.peers[0]
-            .config
-            .allowed_ips
-            .split(',')
-            .filter_map(|cidr| cidr.trim().parse().ok())
-            .collect();
-        let mut peer_with_hs = defguard_wireguard_rs::peer::Peer::new(key);
-        peer_with_hs.allowed_ips = allowed_ips;
-        peer_with_hs.last_handshake = Some(hs_time);
-
+        let (peer_with_hs, route) = aligned_peer_and_route(&state, hs_time);
         let mut mock = TrackedMock::new();
         // Pre-populate the mock so PollSnapshot::capture returns our prepared
         // peer and route — simulating a healthy, established connection.
         mock.push_peer(peer_with_hs);
         mock.push_route(route);
 
-        let events = run_full_cycle_inner(
-            &mut state,
-            "wg0",
-            &Duration::from_secs(60),
-            &Duration::from_secs(180),
-            &mock,
-        )
-        .await;
+        let events = run_full_cycle(&mut state, &mock).await;
 
         // Phase A: sync flips to Connected.
         assert!(
             matches!(state.vpn_connection, VpnConnectionState::Connected { .. }),
             "sync should flip to Connected when peer + HS present"
         );
-
         // Phase B: healthy peer → no notifications.
         assert!(
             events.is_empty(),
             "healthy peer should produce no notifications"
         );
-
         // Phase C: fully aligned → zero VPN calls.
         assert!(!mock.called_configure_peer());
         assert!(!mock.called_add_route());
@@ -319,7 +303,7 @@ mod tests {
     /// + absent peer → restore via configure_peer + add_route.
     #[tokio::test]
     async fn test_full_cycle_restores_re_enabled_peer_after_idle_disable() {
-        let mut state = make_state("alice", "10.0.0.2/32", ALICE_ID);
+        let mut state = make_enabled_alice_state();
         let alice = state
             .peers
             .iter_mut()
@@ -335,27 +319,17 @@ mod tests {
         state.set_desired_for_user(ALICE_ID, "alice", DesiredState::Enabled);
 
         let mock = TrackedMock::new();
-        // Mock starts empty — capture will return no peers, simulating the
-        // post-disable state where the peer was removed from the interface.
+        // Mock starts empty — peer was removed from the interface post-disable.
 
-        let events = run_full_cycle_inner(
-            &mut state,
-            "wg0",
-            &Duration::from_secs(60),
-            &Duration::from_secs(180),
-            &mock,
-        )
-        .await;
+        let events = run_full_cycle(&mut state, &mock).await;
 
         // Sync: still disconnected (no peer on interface).
-        assert!(matches!(
-            state.vpn_connection,
-            VpnConnectionState::Disconnected
-        ));
-
+        assert!(
+            matches!(state.vpn_connection, VpnConnectionState::Disconnected),
+            "sync should stay disconnected after idle disable"
+        );
         // Health: no events — peer isn't in snapshot so there's nothing to assess.
         assert!(events.is_empty());
-
         // Reconcile: re-enable must attempt restore.
         assert!(
             mock.called_configure_peer(),
@@ -367,18 +341,12 @@ mod tests {
         );
 
         // first_seen_at resets because we're starting fresh post-re-enable.
-        let alice = state
-            .peers
-            .iter_mut()
-            .find(|p| p.config.name == "alice")
-            .unwrap();
+        let alice = state.resolve_peer(ALICE_ID, Some("alice")).unwrap();
         assert!(
             alice.first_seen_at.is_some(),
             "timer should reset on re-enable"
         );
     }
-
-    // --- PollSnapshot helper method tests ---
 
     #[test]
     fn test_snapshot_peer_on_iface_matches_by_pubkey() {
@@ -507,8 +475,6 @@ mod tests {
         assert!(snapshot.find_peer(pubkey_str).is_some());
         assert!(snapshot.find_peer("AAAA").is_none());
     }
-
-    // --- sync_vpn_connection edge-case tests ---
 
     /// Peer present with allowed IPs AND handshake → connected.
     #[test]

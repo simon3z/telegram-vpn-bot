@@ -247,8 +247,6 @@ mod tests {
         assert_eq!(list_peer_names(&[]), "none");
     }
 
-    // --- Cross-user isolation ---
-
     #[test]
     fn test_resolve_peer_refuses_other_users_peer_by_name() {
         let st = make_multi_state();
