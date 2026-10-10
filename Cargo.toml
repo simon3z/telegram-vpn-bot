@@ -19,3 +19,8 @@ tracing-journald = "0.3"
 async-trait = "0.1"
 libc = "0.2.189"
 html-escape = "0.2"
+
+[lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+too_many_arguments = "warn"

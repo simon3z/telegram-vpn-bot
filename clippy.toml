@@ -1,0 +1,10 @@
+# Project-wide clippy quality gates (same tooling as steelbx).
+#
+# cognitive-complexity replaces the old arborist gate.
+cognitive-complexity-threshold = 9
+
+# Function length: arborist had no line-based check, so this surpasses it.
+too-many-lines-threshold = 35
+
+# Argument fan-out: also not checked by arborist.
+too-many-arguments-threshold = 5
