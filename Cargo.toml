@@ -7,7 +7,7 @@ edition = "2021"
 strip = true
 
 [dependencies]
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "native-tls"], default-features = false }
 tokio = { version = "1", features = ["net", "signal", "rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1.1", features = ["parse", "serde"], default-features = false }
