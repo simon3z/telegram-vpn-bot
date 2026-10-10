@@ -2,6 +2,7 @@
 name = "telegram-vpn-bot"
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
 
 [profile.release]
 strip = true

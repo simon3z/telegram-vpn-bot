@@ -1,9 +1,11 @@
 /.cargo
 /target
 /vendor
+/rpmbuild
 
 # Agent instructions (internal to development setup)
 .agents
+.pi
 
 # Sensitive configuration (contains bot token)
 config.toml

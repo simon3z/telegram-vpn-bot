@@ -9,7 +9,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/telegram-vpn-bot /etc/tgvpnbot/config.toml
+ExecStart=/usr/bin/telegram-vpn-bot /etc/tgvpnbot/config.toml
 WorkingDirectory=/var/lib/tgvpnbot
 User=tgvpnbot
 Group=tgvpnbot
