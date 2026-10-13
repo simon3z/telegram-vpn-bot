@@ -20,7 +20,7 @@
 [link-crate]: https://crates.io
 [link-cargo]: Cargo.toml
 [link-rust]: https://www.rust-lang.org
-[link-ci]: #quick-start
+[link-ci]: https://github.com/simon3z/telegram-vpn-bot/actions/workflows/ci.yml
 [link-coverage]: #code-coverage
 
 A Telegram bot that implements **port knocking** for WireGuard VPN access. Users knock by sending `/enable <peer>` — the bot flips the peer from inactive to active on the WireGuard interface. Disabling removes it entirely. On every restart the daemon wipes all peers clean, so the VPN surface stays zero unless someone actively enables it.
