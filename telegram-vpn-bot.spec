@@ -1,7 +1,7 @@
 %bcond_without check
 
 Name:           telegram-vpn-bot
-Version:        0.3.0
+Version:        0.3.1
 # Release: computed by rpm-build.sh (--define release N = commits since
 # the last tag + 1); defaults to 1 when release is not defined.
 Release:        %{?release}%{!?release:1}%{?dist}
@@ -113,6 +113,9 @@ done
 %{_sysusersdir}/%{name}.conf
 
 %changelog
+* Thu Oct 29 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.3.1-%{?release}%{!?release:1}
+- Updated to upstream 0.3.1
+
 * Tue Oct 13 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.3.0-%{?release}%{!?release:1}
 - Updated to upstream 0.3.0
 

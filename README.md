@@ -10,7 +10,7 @@
 
 [badge-github]: https://img.shields.io/badge/github-simon3z/telegram--vpn--bot-6f57b0.svg?logo=github
 [badge-license]: https://img.shields.io/badge/license-MIT-blue.svg
-[badge-version]: https://img.shields.io/badge/version-0.3.0-ff8000.svg
+[badge-version]: https://img.shields.io/badge/version-0.3.1-ff8000.svg
 [badge-rust]: https://img.shields.io/badge/rust-edition_2021-steelblue.svg
 [badge-deps]: https://img.shields.io/badge/dependencies-11-green.svg
 [badge-tests]: https://img.shields.io/badge/tests-148_passing-brightgreen.svg
