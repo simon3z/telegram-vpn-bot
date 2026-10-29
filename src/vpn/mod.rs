@@ -229,7 +229,7 @@ pub(crate) fn build_route_delete_request(
     ip: &std::net::Ipv4Addr,
     prefix_len: u8,
 ) -> Ipv4Route {
-    let mut builder = Ipv4Route::new(format!("{ip}"), prefix_len);
+    let mut builder = Ipv4Route::new(*ip, prefix_len);
     if let Some(oif) = route_msg.oif() {
         builder = builder.dev_index(oif);
     } else {
@@ -285,7 +285,7 @@ pub async fn ensure_route(
     cidr: &str,
 ) -> Result<(), String> {
     let (ip, prefix_len) = parse_cidr(cidr)?;
-    let route_config = Ipv4Route::new(format!("{ip}"), prefix_len)
+    let route_config = Ipv4Route::new(ip, prefix_len)
         .dev(iface)
         .protocol(ROUTE_PROTOCOL)
         .metric(50);
