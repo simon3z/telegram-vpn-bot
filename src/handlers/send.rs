@@ -1,12 +1,14 @@
 use super::resolution;
 use crate::state::SystemState;
 use crate::telegram::TelegramClient;
-use html_escape::encode_text;
-
 /// Escape HTML in user-supplied strings before embedding them in Telegram responses.
-/// Escapes &, <, > per WHATWG spec for text node context.
+/// Escapes &, <, > for safe use in text content.
 pub fn escape_html(input: &str) -> String {
-    encode_text(input).to_string()
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .to_string()
 }
 
 pub(crate) async fn send_html(
