@@ -1,7 +1,7 @@
 %bcond_without check
 
 Name:           telegram-vpn-bot
-Version:        0.3.1
+Version:        0.3.2
 # Release: computed by rpm-build.sh (--define release N = commits since
 # the last tag + 1); defaults to 1 when release is not defined.
 Release:        %{?release}%{!?release:1}%{?dist}
@@ -21,10 +21,12 @@ ExclusiveArch:  %{rust_arches}
 Requires:       systemd
 
 BuildRequires:  rust
+BuildRequires:  cargo
 # cargo-rpm-macros provides the %%cargo_* macros and the cargo_vendor
 # fileattr hook: the cargo-vendor.txt installed under %%{_defaultlicensedir}
 # becomes Provides: bundled(crate(<name>)) = <version> per vendored crate.
 BuildRequires:  cargo-rpm-macros
+BuildRequires:  systemd-rpm-macros
 # native-tls (reqwest's TLS backend) links against the system OpenSSL;
 # boringtun's C code is compiled with cc-rs using the standard build flags.
 BuildRequires:  openssl-devel
@@ -113,6 +115,9 @@ done
 %{_sysusersdir}/%{name}.conf
 
 %changelog
+* Sun Nov 22 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.3.2-%{?release}%{!?release:1}
+- Updated to upstream 0.3.2
+
 * Thu Oct 29 2026 Federico Simoncelli <federico.simoncelli@gmail.com> - 0.3.1-%{?release}%{!?release:1}
 - Updated to upstream 0.3.1
 

@@ -20,10 +20,9 @@ jobs:
     steps:
       # git must be in PATH BEFORE checkout, or it falls back to
       # the REST API and no .git directory is created
-      - name: Install build deps
+      - name: Install build infrastructure
         run: |
-          dnf install -y cargo rust-packaging rpm-build rpmlint xz git \
-            openssl-devel
+          dnf install -y git rpm-build xz rpmlint
 
       - uses: actions/checkout@v5
         with:
@@ -31,6 +30,9 @@ jobs:
 
       - name: Allow git in container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve spec BuildRequires
+        run: dnf builddep -y telegram-vpn-bot.spec
 
       - name: Build RPM
         run: ./rpm-build.sh
